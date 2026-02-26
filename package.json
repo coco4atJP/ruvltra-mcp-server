@@ -1,0 +1,37 @@
+{
+  "name": "ruvltra-mcp-server",
+  "version": "0.1.0",
+  "description": "RuvLTRA MCP Server for fast and low-cost vibe coding",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "ruvltra-mcp-server": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --clean",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "mcp",
+    "ruvltra",
+    "claude",
+    "vibe-coding"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.5.0",
+    "@ruvector/ruvllm": "^2.5.1",
+    "@ruvector/ruvllm-win32-x64-msvc": "^2.0.0",
+    "dotenv": "^16.4.5",
+    "node-llama-cpp": "^3.16.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.0.0"
+  }
+}
