@@ -1,131 +1,876 @@
-import ruvllm from '@ruvector/ruvllm';
-const { TrajectoryBuilder, SonaCoordinator } = ruvllm as any;
-import { getLlama, LlamaChatSession, LlamaContext, LlamaModel } from "node-llama-cpp";
-import path from 'path';
-import os from 'os';
-import * as fs from 'fs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  GenerateRequest,
+  HttpFormat,
+  InferenceBackend,
+  InferenceResult,
+  InferenceStatus,
+  ServerConfig,
+} from '../types.js';
+import { Logger } from '../utils/logger.js';
+
+interface LlamaRuntime {
+  readonly modelPath: string;
+  readonly LlamaChatSession: new (options: Record<string, unknown>) => {
+    prompt: (
+      input: string,
+      options?: Record<string, unknown>
+    ) => Promise<string>;
+  };
+  readonly context: {
+    getSequence?: () => {
+      dispose?: () => void;
+    };
+  };
+}
+
+interface RuvllmRuntime {
+  readonly module: Record<string, unknown>;
+  readonly client: unknown;
+  readonly trajectoryBuilderCtor?: new () => {
+    startStep?: (step: string, payload: string) => void;
+    endStep?: (payload: string, confidence: number) => void;
+    complete?: (status: string) => unknown;
+  };
+  readonly sonaCoordinator?: {
+    recordTrajectory?: (trajectory: unknown) => void;
+    runBackgroundLoop?: () => unknown;
+  };
+}
+
+interface HttpCircuitState {
+  state: 'closed' | 'open' | 'half_open';
+  consecutiveFailures: number;
+  openedAt?: number;
+  nextAttemptAt?: number;
+}
+
+const BACKEND_ORDER: InferenceBackend[] = ['http', 'llama', 'ruvllm', 'mock'];
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export class InferenceEngine {
-  private sonaEnabled: boolean;
-  private endpoint?: string;
-  private llamaModel: LlamaModel | null = null;
-  private llamaContext: LlamaContext | null = null;
-  private isInitialized = false;
-  private sona: any | null = null;
+  private initialized = false;
+  private activeBackend: InferenceBackend = 'mock';
 
-  constructor(options: { sonaEnabled: boolean; endpoint?: string }) {
-    this.sonaEnabled = options.sonaEnabled;
-    this.endpoint = options.endpoint;
-    if (this.sonaEnabled) {
-      this.sona = new SonaCoordinator();
-    }
-  }
+  private readonly backendReady: Record<InferenceBackend, boolean> = {
+    http: false,
+    llama: false,
+    ruvllm: false,
+    mock: true,
+  };
 
-  async initialize(modelIdOrPath: string = 'ruvltra-claude-code') {
-    if (this.endpoint) {
-      console.log(`[RuvLLM Engine] Using HTTP endpoint: ${this.endpoint}`);
-      this.isInitialized = true;
+  private readonly backendNotes: Partial<Record<InferenceBackend, string>> = {
+    mock: 'Fallback backend is always available',
+  };
+
+  private llamaRuntime: LlamaRuntime | undefined;
+  private ruvllmRuntime: RuvllmRuntime | undefined;
+  private readonly httpCircuit: HttpCircuitState = {
+    state: 'closed',
+    consecutiveFailures: 0,
+  };
+
+  constructor(
+    private readonly config: ServerConfig,
+    private readonly logger: Logger
+  ) {}
+
+  async initialize(): Promise<void> {
+    if (this.initialized) {
       return;
     }
 
+    this.backendReady.http = Boolean(this.config.httpEndpoint);
+    if (this.backendReady.http) {
+      this.backendNotes.http = 'Configured from RUVLTRA_HTTP_ENDPOINT';
+    } else {
+      this.backendNotes.http = 'RUVLTRA_HTTP_ENDPOINT is not set';
+    }
+
+    this.backendReady.llama = await this.tryInitializeLlama();
+    this.backendReady.ruvllm = await this.tryInitializeRuvllm();
+
+    this.activeBackend = BACKEND_ORDER.find((backend) => this.backendReady[backend]) ?? 'mock';
+    this.initialized = true;
+
+    this.logger.info('Inference engine initialized', {
+      activeBackend: this.activeBackend,
+      readyBackends: BACKEND_ORDER.filter((backend) => this.backendReady[backend]),
+    });
+  }
+
+  async generate(
+    request: GenerateRequest,
+    signal?: AbortSignal
+  ): Promise<InferenceResult> {
+    if (!this.initialized) {
+      await this.initialize();
+    }
+
+    this.throwIfAborted(signal);
+
+    const prompt = this.buildPrompt(request);
+    const attemptBackends = this.buildAttemptOrder();
+
+    let lastError: Error | undefined;
+    for (const backend of attemptBackends) {
+      if (!this.backendReady[backend]) {
+        continue;
+      }
+      try {
+        const result = await this.generateWithBackend(backend, request, prompt, signal);
+        this.activeBackend = backend;
+        return result;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.backendNotes[backend] = `Runtime failure: ${message}`;
+        lastError = error instanceof Error ? error : new Error(message);
+        this.logger.warn(`Backend ${backend} failed, trying next fallback`, {
+          error: message,
+        });
+      }
+    }
+
+    if (lastError) {
+      throw lastError;
+    }
+
+    return this.generateWithMock(request, prompt, signal);
+  }
+
+  getStatus(): InferenceStatus {
+    return {
+      activeBackend: this.activeBackend,
+      readyBackends: BACKEND_ORDER.filter((backend) => this.backendReady[backend]),
+      backendNotes: { ...this.backendNotes },
+      modelPath: this.resolveModelPath(),
+      httpEndpoint: this.config.httpEndpoint,
+      httpCircuit: {
+        state: this.httpCircuit.state,
+        consecutiveFailures: this.httpCircuit.consecutiveFailures,
+        openedAt: this.httpCircuit.openedAt
+          ? new Date(this.httpCircuit.openedAt).toISOString()
+          : undefined,
+        nextAttemptAt: this.httpCircuit.nextAttemptAt
+          ? new Date(this.httpCircuit.nextAttemptAt).toISOString()
+          : undefined,
+      },
+    };
+  }
+
+  async shutdown(): Promise<void> {
+    const context = this.llamaRuntime?.context as
+      | { dispose?: () => void }
+      | undefined;
+    if (context?.dispose) {
+      try {
+        context.dispose();
+      } catch {
+        // Ignore cleanup failures.
+      }
+    }
+  }
+
+  private async generateWithBackend(
+    backend: InferenceBackend,
+    request: GenerateRequest,
+    prompt: string,
+    signal?: AbortSignal
+  ): Promise<InferenceResult> {
+    switch (backend) {
+      case 'http':
+        return this.generateWithHttp(request, prompt, signal);
+      case 'llama':
+        return this.generateWithLlama(request, prompt, signal);
+      case 'ruvllm':
+        return this.generateWithRuvllm(request, prompt, signal);
+      case 'mock':
+      default:
+        return this.generateWithMock(request, prompt, signal);
+    }
+  }
+
+  private async generateWithHttp(
+    request: GenerateRequest,
+    prompt: string,
+    signal?: AbortSignal
+  ): Promise<InferenceResult> {
+    const endpoint = this.config.httpEndpoint;
+    if (!endpoint) {
+      throw new Error('HTTP endpoint is not configured');
+    }
+
+    this.throwIfAborted(signal);
+    this.ensureHttpCircuitAllowsAttempt();
+
+    const maxTokens = request.maxTokens ?? this.config.maxTokens;
+    const temperature = request.temperature ?? this.config.temperature;
+
+    const format = this.resolveHttpFormat();
+    const payload =
+      format === 'llama'
+        ? {
+            prompt,
+            n_predict: maxTokens,
+            temperature,
+            stream: false,
+          }
+        : {
+            model: this.config.httpModel,
+            messages: [{ role: 'user', content: prompt }],
+            max_tokens: maxTokens,
+            temperature,
+          };
+
+    const maxRetries = Math.max(0, this.config.httpMaxRetries);
+    let lastError: Error | undefined;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      this.throwIfAborted(signal);
+      const start = Date.now();
+      let cleanupSignal: (() => void) | undefined;
+      try {
+        const requestSignal = this.createRequestSignal(signal, this.config.httpTimeoutMs);
+        cleanupSignal = requestSignal.cleanup;
+
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(this.config.httpApiKey
+              ? { authorization: `Bearer ${this.config.httpApiKey}` }
+              : {}),
+          },
+          body: JSON.stringify(payload),
+          signal: requestSignal.signal,
+        });
+
+        if (!response.ok) {
+          const statusError = new Error(
+            `HTTP ${response.status}: ${response.statusText}`
+          ) as Error & { statusCode?: number };
+          statusError.statusCode = response.status;
+          throw statusError;
+        }
+
+        const data = (await response.json()) as Record<string, unknown>;
+        const text = this.parseHttpText(data, format);
+        if (!text) {
+          throw new Error('HTTP response did not include generated content');
+        }
+
+        const usage = (data.usage ?? {}) as Record<string, unknown>;
+        this.recordHttpSuccess();
+        return {
+          text,
+          backend: 'http',
+          model: this.config.httpModel,
+          latencyMs: Date.now() - start,
+          promptTokens: this.extractNumber(usage.prompt_tokens),
+          completionTokens: this.extractNumber(usage.completion_tokens),
+        };
+      } catch (error) {
+        const wrapped =
+          error instanceof Error ? error : new Error(String(error));
+        if (this.isAbortError(wrapped)) {
+          if (signal?.aborted) {
+            throw this.abortReason(signal);
+          }
+          const timeoutError = new Error(
+            `HTTP request timed out after ${this.config.httpTimeoutMs}ms`
+          );
+          lastError = timeoutError;
+        } else {
+          lastError = wrapped;
+        }
+
+        const canRetry =
+          attempt < maxRetries && this.isRetryableHttpError(lastError);
+        if (canRetry) {
+          const backoff = this.computeRetryDelay(attempt);
+          await this.sleepWithSignal(backoff, signal);
+          continue;
+        }
+
+        this.recordHttpFailure();
+      } finally {
+        cleanupSignal?.();
+      }
+    }
+
+    throw lastError ?? new Error('HTTP backend failed');
+  }
+
+  private async generateWithLlama(
+    request: GenerateRequest,
+    prompt: string,
+    signal?: AbortSignal
+  ): Promise<InferenceResult> {
+    if (!this.llamaRuntime) {
+      throw new Error('llama.cpp backend is not initialized');
+    }
+
+    this.throwIfAborted(signal);
+
+    const start = Date.now();
+    const sequence = this.llamaRuntime.context.getSequence?.();
+    const sessionOptions =
+      sequence !== undefined ? { contextSequence: sequence } : { context: this.llamaRuntime.context };
+    const session = new this.llamaRuntime.LlamaChatSession(sessionOptions);
+
     try {
-      console.log(`[RuvLLM Engine] Initializing hybrid engine for model: ${modelIdOrPath}`);
-      let modelPath = modelIdOrPath;
-      
-      if (modelIdOrPath === 'ruvltra-claude-code' || modelIdOrPath === 'qwen-base') {
-         const defaultPath = path.join(os.homedir(), '.ruvllm', 'models', 'ruvltra-claude-code-0.5b-q4_k_m.gguf');
-         if (fs.existsSync(defaultPath)) {
-            modelPath = defaultPath;
-         } else {
-            modelPath = await ruvllm.downloadModel(modelIdOrPath);
-         }
+      const text = await this.withAbort(
+        session.prompt(prompt, {
+          maxTokens: request.maxTokens ?? this.config.maxTokens,
+          temperature: request.temperature ?? this.config.temperature,
+        }),
+        signal
+      );
+      return {
+        text,
+        backend: 'llama',
+        model: this.llamaRuntime.modelPath,
+        latencyMs: Date.now() - start,
+      };
+    } finally {
+      sequence?.dispose?.();
+    }
+  }
+
+  private async generateWithRuvllm(
+    request: GenerateRequest,
+    prompt: string,
+    signal?: AbortSignal
+  ): Promise<InferenceResult> {
+    const runtime = this.ruvllmRuntime;
+    if (!runtime) {
+      throw new Error('RuvLLM backend is not initialized');
+    }
+
+    this.throwIfAborted(signal);
+
+    const maxTokens = request.maxTokens ?? this.config.maxTokens;
+    const temperature = request.temperature ?? this.config.temperature;
+    const start = Date.now();
+
+    let trajectoryBuilder: InstanceType<
+      NonNullable<RuvllmRuntime['trajectoryBuilderCtor']>
+    > | null = null;
+
+    if (runtime.trajectoryBuilderCtor && this.config.sonaEnabled) {
+      trajectoryBuilder = new runtime.trajectoryBuilderCtor();
+      trajectoryBuilder.startStep?.('query', prompt);
+    }
+
+    let rawOutput: unknown;
+    const client = runtime.client as { generate?: (input: unknown) => Promise<unknown> } | null;
+    const moduleRecord = runtime.module as {
+      generate?: (input: unknown) => Promise<unknown>;
+      complete?: (input: unknown) => Promise<unknown>;
+    };
+
+    if (client?.generate) {
+      rawOutput = await this.withAbort(
+        client.generate({
+          prompt,
+          maxTokens,
+          temperature,
+          model: this.config.modelPath ?? this.config.httpModel,
+        }),
+        signal
+      );
+    } else if (moduleRecord.generate) {
+      rawOutput = await this.withAbort(
+        moduleRecord.generate({
+          prompt,
+          maxTokens,
+          temperature,
+          model: this.config.modelPath ?? this.config.httpModel,
+        }),
+        signal
+      );
+    } else if (moduleRecord.complete) {
+      rawOutput = await this.withAbort(
+        moduleRecord.complete({
+          prompt,
+          maxTokens,
+          temperature,
+          model: this.config.modelPath ?? this.config.httpModel,
+        }),
+        signal
+      );
+    } else {
+      throw new Error('No compatible generate API found in @ruvector/ruvllm');
+    }
+
+    const text = this.extractGeneratedText(rawOutput);
+    if (!text) {
+      throw new Error('RuvLLM returned empty output');
+    }
+
+    if (trajectoryBuilder && runtime.sonaCoordinator) {
+      trajectoryBuilder.endStep?.(text, 0.85);
+      const trajectory = trajectoryBuilder.complete?.('success');
+      if (trajectory && runtime.sonaCoordinator.recordTrajectory) {
+        runtime.sonaCoordinator.recordTrajectory(trajectory);
+      }
+      runtime.sonaCoordinator.runBackgroundLoop?.();
+    }
+
+    return {
+      text,
+      backend: 'ruvllm',
+      model: this.config.modelPath ?? this.config.httpModel,
+      latencyMs: Date.now() - start,
+    };
+  }
+
+  private async generateWithMock(
+    request: GenerateRequest,
+    prompt: string,
+    signal?: AbortSignal
+  ): Promise<InferenceResult> {
+    this.throwIfAborted(signal);
+
+    const start = Date.now();
+    const jitter = Math.floor(Math.random() * 40);
+    await this.sleepWithSignal(this.config.mockLatencyMs + jitter, signal);
+
+    const text = [
+      `// Mock backend response (${request.taskType})`,
+      `// Instruction: ${request.instruction.slice(0, 120)}`,
+      request.context
+        ? `// Context length: ${request.context.length}`
+        : '// Context length: 0',
+      '',
+      '/*',
+      '  This is mock output because no inference backend is currently available.',
+      '  Configure one of the following for real generations:',
+      '  - RUVLTRA_HTTP_ENDPOINT',
+      '  - RUVLTRA_MODEL_PATH with node-llama-cpp support',
+      '  - @ruvector/ruvllm runtime support',
+      '*/',
+      '',
+      prompt
+        .split('\n')
+        .slice(0, 8)
+        .join('\n'),
+    ].join('\n');
+
+    return {
+      text,
+      backend: 'mock',
+      model: 'mock://ruvltra',
+      latencyMs: Date.now() - start,
+    };
+  }
+
+  private async tryInitializeLlama(): Promise<boolean> {
+    const modelPath = this.resolveModelPath();
+    if (!modelPath) {
+      this.backendNotes.llama = 'Model file not found (set RUVLTRA_MODEL_PATH)';
+      return false;
+    }
+
+    try {
+      const llamaModule = (await import('node-llama-cpp')) as Record<string, unknown>;
+      const getLlama = llamaModule.getLlama as
+        | (() => Promise<{ loadModel: (options: unknown) => Promise<unknown> }>)
+        | undefined;
+      const LlamaChatSession = llamaModule.LlamaChatSession as LlamaRuntime['LlamaChatSession'] | undefined;
+
+      if (!getLlama || !LlamaChatSession) {
+        this.backendNotes.llama = 'node-llama-cpp API not available';
+        return false;
       }
 
-      console.log(`[RuvLLM Engine] Loading model with node-llama-cpp: ${modelPath}`);
       const llama = await getLlama();
-      this.llamaModel = await llama.loadModel({ modelPath });
-      this.llamaContext = await this.llamaModel.createContext();
+      const model = (await llama.loadModel({
+        modelPath,
+        gpuLayers: this.config.gpuLayers,
+      })) as {
+        createContext: (options: Record<string, unknown>) => Promise<LlamaRuntime['context']>;
+      };
 
-      console.log(`[RuvLLM Engine] Engine loaded successfully. SONA Enabled: ${this.sonaEnabled}`);
-      this.isInitialized = true;
-    } catch (e: any) {
-      console.error(`[RuvLLM Engine] Failed to initialize engine: ${e.message}`);
-      console.warn(`[RuvLLM Engine] Will fall back to mock generation.`);
-      this.isInitialized = true;
+      const context = await model.createContext({
+        contextSize: this.config.contextLength,
+        threads: this.config.threads > 0 ? this.config.threads : undefined,
+      });
+
+      this.llamaRuntime = {
+        modelPath,
+        context,
+        LlamaChatSession,
+      };
+      this.backendNotes.llama = `Loaded model: ${modelPath}`;
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.backendNotes.llama = `Initialization failed: ${message}`;
+      return false;
     }
   }
 
-  async generate(instruction: string, context?: string): Promise<string> {
-    if (!this.isInitialized) {
-        await this.initialize();
-    }
+  private async tryInitializeRuvllm(): Promise<boolean> {
+    try {
+      const imported = (await import('@ruvector/ruvllm')) as Record<string, unknown>;
+      const moduleRecord =
+        (imported.default as Record<string, unknown> | undefined) ?? imported;
 
-    // SONA: Start tracking trajectory if enabled
-    let builder: any = null;
-    if (this.sonaEnabled && this.sona) {
-        builder = new TrajectoryBuilder();
-        builder.startStep('query', instruction);
-    }
+      let client: unknown = null;
 
-    const prompt = context 
-        ? `Context:\n${context}\n\nInstruction:\n${instruction}\n\nResponse:`
-        : `Instruction:\n${instruction}\n\nResponse:`;
+      const createClient = moduleRecord.createClient as
+        | ((options: Record<string, unknown>) => Promise<unknown>)
+        | undefined;
+      const RuvLLMClass = moduleRecord.RuvLLM as
+        | (new (options: Record<string, unknown>) => unknown)
+        | undefined;
 
-    let resultText = '';
-
-    if (this.endpoint) {
-        try {
-            const res = await fetch(this.endpoint, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...(process.env.RUVLTRA_HTTP_API_KEY && { 'Authorization': `Bearer ${process.env.RUVLTRA_HTTP_API_KEY}` })
-                },
-                body: JSON.stringify({
-                    model: process.env.RUVLTRA_HTTP_MODEL || 'ruvltra-claude-code',
-                    messages: [{ role: 'user', content: prompt }],
-                    max_tokens: 512,
-                    temperature: 0.7
-                })
-            });
-            if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-            const data: any = await res.json();
-            resultText = data.choices?.[0]?.message?.content || data.content || '';
-        } catch (e: any) {
-            console.error(`[RuvLLM Engine] HTTP Endpoint error: ${e.message}`);
-            resultText = `// Error calling HTTP endpoint: ${e.message}`;
-        }
-    } else if (this.llamaContext) {
-        // Create an isolated session for parallel execution
-        const session = new LlamaChatSession({ 
-           contextSequence: this.llamaContext.getSequence() 
+      if (createClient) {
+        client = await createClient({
+          model: this.config.modelPath ?? this.config.httpModel,
         });
-        console.error(`[RuvLLM Engine] Generating with node-llama-cpp (session isolated)...`);
-        resultText = await session.prompt(prompt);
-    } else {
-        // Mock fallback
-        const delay = Math.random() * 500 + 500;
-        await new Promise(resolve => setTimeout(resolve, delay));
-        resultText = `// Mock Generated code based on: ${instruction}\n// Context size: ${context ? context.length : 0} bytes\n\nfunction generatedTask() {\n  console.log("Implementation pending");\n}\n`;
-    }
+      } else if (RuvLLMClass) {
+        client = new RuvLLMClass({
+          model: this.config.modelPath ?? this.config.httpModel,
+        });
+      }
 
-    // SONA: End tracking and record successful execution
-    if (builder && this.sona) {
-        builder.endStep(resultText, 0.9); // Assume high confidence for now
-        const trajectory = builder.complete('success');
-        this.sona.recordTrajectory(trajectory);
-        
-        // Trigger background learning periodically
-        if (Math.random() < 0.2) {
-            const stats = this.sona.runBackgroundLoop();
-            console.error(`[SONA] Background learning run. Patterns learned: ${stats.patternsLearned}`);
-        }
-    }
+      const TrajectoryBuilder = moduleRecord.TrajectoryBuilder as
+        | RuvllmRuntime['trajectoryBuilderCtor']
+        | undefined;
+      const SonaCoordinator = moduleRecord.SonaCoordinator as
+        | (new () => RuvllmRuntime['sonaCoordinator'])
+        | undefined;
 
-    return resultText;
+      const moduleHasCallableGenerator =
+        typeof moduleRecord.generate === 'function' ||
+        typeof moduleRecord.complete === 'function';
+      const clientHasCallableGenerator =
+        typeof (client as { generate?: unknown } | null)?.generate === 'function';
+
+      if (!moduleHasCallableGenerator && !clientHasCallableGenerator) {
+        this.backendNotes.ruvllm =
+          'Initialization failed: no callable generate API found in module/client';
+        return false;
+      }
+
+      this.ruvllmRuntime = {
+        module: moduleRecord,
+        client,
+        trajectoryBuilderCtor: TrajectoryBuilder,
+        sonaCoordinator: this.config.sonaEnabled && SonaCoordinator ? new SonaCoordinator() : undefined,
+      };
+
+      this.backendNotes.ruvllm = 'Native @ruvector/ruvllm backend ready';
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.backendNotes.ruvllm = `Initialization failed: ${message}`;
+      return false;
+    }
   }
 
-  async refactor(code: string, instruction?: string): Promise<string> {
-    return this.generate(`Refactor the following code: ${instruction || ''}\n\nCode:\n${code}`);
+  private resolveHttpFormat(): HttpFormat {
+    if (this.config.httpFormat !== 'auto') {
+      return this.config.httpFormat;
+    }
+
+    const endpoint = this.config.httpEndpoint ?? '';
+    if (
+      endpoint.includes('/chat/completions') ||
+      endpoint.includes('/v1/completions')
+    ) {
+      return 'openai';
+    }
+    if (endpoint.includes('/completion') || endpoint.includes('/generate')) {
+      return 'llama';
+    }
+    return 'openai';
+  }
+
+  private buildAttemptOrder(): InferenceBackend[] {
+    // Always prioritize canonical order so higher-priority backends can recover automatically.
+    return [...BACKEND_ORDER];
+  }
+
+  private parseHttpText(
+    data: Record<string, unknown>,
+    format: HttpFormat
+  ): string | undefined {
+    if (format === 'llama') {
+      return this.extractGeneratedText(data);
+    }
+
+    const choices = data.choices as Array<Record<string, unknown>> | undefined;
+    const choice = Array.isArray(choices) ? choices[0] : undefined;
+    const message = choice?.message as Record<string, unknown> | undefined;
+    const fromChat = message?.content;
+    const fromCompletion = choice?.text;
+
+    const parsed = this.extractGeneratedText(fromChat ?? fromCompletion ?? data);
+    return parsed;
+  }
+
+  private extractGeneratedText(value: unknown): string | undefined {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      return trimmed.length > 0 ? trimmed : undefined;
+    }
+
+    if (!value || typeof value !== 'object') {
+      return undefined;
+    }
+
+    const record = value as Record<string, unknown>;
+    const candidates: unknown[] = [
+      record.content,
+      record.text,
+      record.response,
+      record.completion,
+      record.generated_text,
+      record.output,
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim().length > 0) {
+        return candidate.trim();
+      }
+      if (candidate && typeof candidate === 'object') {
+        const nestedText = this.extractGeneratedText(candidate);
+        if (nestedText) {
+          return nestedText;
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  private extractNumber(value: unknown): number | undefined {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === 'string') {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+    return undefined;
+  }
+
+  private buildPrompt(request: GenerateRequest): string {
+    const sections: string[] = [];
+    sections.push(`Task: ${request.taskType}`);
+    if (request.language) {
+      sections.push(`Language: ${request.language}`);
+    }
+    if (request.filePath) {
+      sections.push(`File: ${request.filePath}`);
+    }
+    sections.push('');
+    sections.push('Instruction:');
+    sections.push(request.instruction.trim());
+
+    if (request.context) {
+      sections.push('');
+      sections.push('Context:');
+      sections.push(request.context.trim());
+    }
+
+    sections.push('');
+    sections.push('Return only the final answer with clear, practical output.');
+    return sections.join('\n');
+  }
+
+  private resolveModelPath(): string | undefined {
+    const configured = this.config.modelPath;
+    if (configured && fs.existsSync(configured)) {
+      return configured;
+    }
+
+    const candidates = [
+      path.join(process.cwd(), 'models', 'ruvltra-claude-code-0.5b-q4_k_m.gguf'),
+      path.join(
+        os.homedir(),
+        '.ruvltra',
+        'models',
+        'ruvltra-claude-code-0.5b-q4_k_m.gguf'
+      ),
+    ];
+
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+
+    return configured;
+  }
+
+  private createRequestSignal(parent: AbortSignal | undefined, timeoutMs: number): {
+    signal: AbortSignal;
+    cleanup: () => void;
+  } {
+    const controller = new AbortController();
+    const onParentAbort = (): void => {
+      controller.abort(this.abortReason(parent));
+    };
+    if (parent) {
+      if (parent.aborted) {
+        onParentAbort();
+      } else {
+        parent.addEventListener('abort', onParentAbort, { once: true });
+      }
+    }
+
+    const timeoutHandle = setTimeout(() => {
+      controller.abort(new Error(`HTTP request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    timeoutHandle.unref?.();
+
+    return {
+      signal: controller.signal,
+      cleanup: () => {
+        clearTimeout(timeoutHandle);
+        if (parent) {
+          parent.removeEventListener('abort', onParentAbort);
+        }
+      },
+    };
+  }
+
+  private ensureHttpCircuitAllowsAttempt(): void {
+    if (this.httpCircuit.state !== 'open') {
+      return;
+    }
+    const now = Date.now();
+    if ((this.httpCircuit.nextAttemptAt ?? 0) <= now) {
+      this.httpCircuit.state = 'half_open';
+      return;
+    }
+    const waitMs = Math.max(0, (this.httpCircuit.nextAttemptAt ?? 0) - now);
+    throw new Error(`HTTP circuit open; retry after ${waitMs}ms`);
+  }
+
+  private recordHttpSuccess(): void {
+    this.httpCircuit.state = 'closed';
+    this.httpCircuit.consecutiveFailures = 0;
+    this.httpCircuit.openedAt = undefined;
+    this.httpCircuit.nextAttemptAt = undefined;
+    this.backendNotes.http = 'HTTP backend healthy';
+  }
+
+  private recordHttpFailure(): void {
+    this.httpCircuit.consecutiveFailures += 1;
+    if (
+      this.httpCircuit.consecutiveFailures >= this.config.httpCircuitFailureThreshold
+    ) {
+      this.httpCircuit.state = 'open';
+      this.httpCircuit.openedAt = Date.now();
+      this.httpCircuit.nextAttemptAt =
+        this.httpCircuit.openedAt + this.config.httpCircuitCooldownMs;
+      this.backendNotes.http =
+        `Circuit open after ${this.httpCircuit.consecutiveFailures} failures`;
+      return;
+    }
+
+    if (this.httpCircuit.state === 'half_open') {
+      this.httpCircuit.state = 'open';
+      this.httpCircuit.openedAt = Date.now();
+      this.httpCircuit.nextAttemptAt =
+        this.httpCircuit.openedAt + this.config.httpCircuitCooldownMs;
+      this.backendNotes.http = 'Circuit reopened after half-open probe failure';
+    }
+  }
+
+  private isRetryableHttpError(error: Error): boolean {
+    const status = (error as Error & { statusCode?: number }).statusCode;
+    if (typeof status === 'number') {
+      return status === 408 || status === 429 || status >= 500;
+    }
+
+    const message = error.message.toLowerCase();
+    return (
+      message.includes('timeout') ||
+      message.includes('network') ||
+      message.includes('econnreset') ||
+      message.includes('fetch failed')
+    );
+  }
+
+  private computeRetryDelay(attempt: number): number {
+    const base = Math.max(1, this.config.httpRetryBaseMs);
+    const exponential = Math.min(base * 2 ** attempt, 15_000);
+    const jitter = Math.floor(Math.random() * 50);
+    return exponential + jitter;
+  }
+
+  private async sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+    if (ms <= 0) {
+      return;
+    }
+    await this.withAbort(delay(ms), signal);
+  }
+
+  private async withAbort<T>(
+    promise: Promise<T>,
+    signal?: AbortSignal
+  ): Promise<T> {
+    if (!signal) {
+      return promise;
+    }
+    if (signal.aborted) {
+      throw this.abortReason(signal);
+    }
+
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = (): void => {
+        reject(this.abortReason(signal));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+
+      promise
+        .then((value) => {
+          signal.removeEventListener('abort', onAbort);
+          resolve(value);
+        })
+        .catch((error) => {
+          signal.removeEventListener('abort', onAbort);
+          reject(error);
+        });
+    });
+  }
+
+  private throwIfAborted(signal?: AbortSignal): void {
+    if (signal?.aborted) {
+      throw this.abortReason(signal);
+    }
+  }
+
+  private abortReason(signal?: AbortSignal): Error {
+    const reason = signal?.reason;
+    if (reason instanceof Error) {
+      return reason;
+    }
+    if (typeof reason === 'string' && reason.length > 0) {
+      return new Error(reason);
+    }
+    return new Error('Operation aborted');
+  }
+
+  private isAbortError(error: Error): boolean {
+    const normalized = `${error.name}:${error.message}`.toLowerCase();
+    return (
+      normalized.includes('abort') ||
+      normalized.includes('aborted') ||
+      normalized.includes('operation aborted')
+    );
   }
 }

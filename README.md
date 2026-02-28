@@ -1,121 +1,68 @@
 # RuvLTRA MCP Server
 
-**並列 RuvLTRA 推論による高速・低コスト バイブコーディング**
+[English](./README.md) | [日本語 (Japanese)](#日本語-japanese)
 
-Claude Code, Gemini CLI, Codex 等の AI Agent ツールから MCP (Model Context Protocol) を通じて [ruv/ruvltra-claude-code](https://huggingface.co/ruv/ruvltra-claude-code) モデルを並列実行し、SONA 自己改善を活用するサーバー。
-
----
-
-## Architecture
-
-```
-  ┌────────────────────────────────────────────────┐
-  │  AI Agent (Claude Code / Gemini CLI / Codex)   │
-  │  ─ 指示塔: タスク分解・結果統合                  │
-  └─────────────────────┬──────────────────────────┘
-                        │ stdio (JSON-RPC 2.0)
-                        ▼
-  ┌────────────────────────────────────────────────┐
-  │          RuvLTRA MCP Server                     │
-  │  ┌──────────────────────────────────────────┐  │
-  │  │  MCP Core (JSON-RPC / initialize / tools) │  │
-  │  └──────────────────┬───────────────────────┘  │
-  │                     │                          │
-  │  ┌──────────────────▼───────────────────────┐  │
-  │  │  Tool Handlers                            │  │
-  │  │  code_generate / review / refactor / ...  │  │
-  │  │  parallel_generate / swarm_review         │  │
-  │  └──────────────────┬───────────────────────┘  │
-  │                     │                          │
-  │  ┌──────────────────▼───────────────────────┐  │
-  │  │  Worker Pool (auto-scaling 2..8)          │  │
-  │  │  ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐        │  │
-  │  │  │ W1  │ │ W2  │ │ W3  │ │ W4  │  ...   │  │
-  │  │  │+SONA│ │+SONA│ │+SONA│ │+SONA│        │  │
-  │  │  └──┬──┘ └──┬──┘ └──┬──┘ └──┬──┘        │  │
-  │  └─────┼───────┼───────┼───────┼────────────┘  │
-  │        └───────┼───────┼───────┘               │
-  │                ▼                                │
-  │  ┌─────────────────────────────────┐           │
-  │  │  Inference Engine               │           │
-  │  │  Backend: RuvLLM / llama.cpp /  │           │
-  │  │           HTTP endpoint / mock  │           │
-  │  └─────────────────────────────────┘           │
-  └────────────────────────────────────────────────┘
-                        │
-                        ▼
-  ┌────────────────────────────────────────────────┐
-  │  ruv/ruvltra-claude-code (0.5B, GGUF Q4_K_M)  │
-  │  + SONA Self-Learning (EWC++ / MicroLoRA)      │
-  └────────────────────────────────────────────────┘
-```
-
-## Key Concepts
-
-| 概念 | 説明 |
-|------|------|
-| **指示塔モデル** | Claude Code / Gemini CLI / Codex がタスクを分解し、MCPツールを呼び出す |
-| **並列実行** | Worker Pool が複数の RuvLTRA インスタンスを同時に動かし、スループットを最大化 |
-| **SONA 自己改善** | 各 Worker が SONA エンジンを持ち、成功パターンを学習・保持 (EWC++ で忘却防止) |
-| **RuvLLM バックエンド** | `@ruvector/ruvllm` で実行すると SONA の自己改善がネイティブに機能 |
-| **低コスト** | 0.5B パラメータモデル (398MB) でローカル実行可能。GPU 不要でも動作 |
+`ruv/ruvltra-claude-code` を Claude Code / Gemini CLI / Codex などの指示塔エージェントから MCP 経由で並列活用するためのサーバーです。  
+現行実装は「並列生成」だけでなく、運用向けの耐障害性（timeout, backpressure, retry, circuit breaker, SONA永続化）まで含めています。
 
 ---
 
-## Quick Start
+## 日本語 (Japanese)
 
-### 1. Install
+RuvLTRA MCP Server は、大規模言語モデル (LLM) を MCP (Model Context Protocol) 経由で並列実行し、堅牢な生成パイプラインを提供するサーバーです。
+
+### 主な機能
+
+- **13種類の MCP ツール**: `code_*` (生成、レビュー、リファクタ、翻訳など), `parallel_generate`, `swarm_review` など。
+- **WorkerPool の動的スケーリング**: 負荷に応じたワーカーの自動増減とバックプレッシャー制御。
+- **耐障害性 (Resilience)**: タスクごとのタイムアウト、再試行 (Retry)、サーキットブレーカーによる安定稼働。
+- **4段階の推論フォールバック**: HTTP -> llama.cpp -> RuvLLM -> Mock の順で自動切り替え。
+- **SONA 永続化**: ワーカーごとの自己改善状態の保存と再ロード。
+
+### アーキテクチャ概要
+
+```
+  Claude Code / Gemini CLI / Codex (指示塔)
+                   |
+             stdio JSON-RPC
+                   v
+  +-------------------------------------------+
+  | MCP Server Core (13ツール)                |
+  |  - 並列生成 / スウォーム・レビュー        |
+  |                                           |
+  | Worker Pool (動的スケール 2..8)           |
+  |  - キュー管理 / タイムアウト制御          |
+  |                                           |
+  | 推論エンジン (フォールバック制御)         |
+  |  HTTP -> llama.cpp -> RuvLLM -> Mock      |
+  +-------------------------------------------+
+```
+
+### クイックスタート
 
 ```bash
-git clone <this-repo>
-cd ruvltra-mcp-server
 npm install
 npm run build
+# サーバー起動 (モックモード)
+node dist/index.js
 ```
 
-### 2. Download Model (optional - mock mode available without model)
+実際の推論を使用するには、以下のいずれかの環境変数を設定してください：
+- `RUVLTRA_HTTP_ENDPOINT`: OpenAI 互換または llama.cpp HTTP エンドポイント
+- `RUVLTRA_MODEL_PATH`: ローカルの GGUF モデルパス
 
-```bash
-# Direct download
-wget https://huggingface.co/ruv/ruvltra-claude-code/resolve/main/ruvltra-claude-code-0.5b-q4_k_m.gguf 
-  -P ~/.ruvltra/models/
+### Claude Desktop 設定例
 
-# Or via Python
-pip install huggingface-hub
-huggingface-cli download ruv/ruvltra-claude-code 
-  ruvltra-claude-code-0.5b-q4_k_m.gguf 
-  --local-dir ~/.ruvltra/models/
-```
-
-### 3. Configure AI Agent
-
-#### Claude Code (`~/.claude/claude_desktop_config.json`)
+`~/.claude/claude_desktop_config.json`
 
 ```json
 {
   "mcpServers": {
     "ruvltra": {
       "command": "node",
-      "args": ["/path/to/ruvltra-mcp-server/dist/index.js"],
+      "args": ["/absolute/path/to/ruvltra-mcp-server/dist/index.js"],
       "env": {
-        "RUVLTRA_LOG_LEVEL": "info",
-        "RUVLTRA_MAX_WORKERS": "4",
-        "RUVLTRA_SONA_ENABLED": "true"
-      }
-    }
-  }
-}
-```
-
-#### Gemini CLI (`.gemini/settings.json`)
-
-```json
-{
-  "mcpServers": {
-    "ruvltra": {
-      "command": "node",
-      "args": ["/path/to/ruvltra-mcp-server/dist/index.js"],
-      "env": {
+        "RUVLTRA_MIN_WORKERS": "2",
         "RUVLTRA_MAX_WORKERS": "4"
       }
     }
@@ -123,166 +70,277 @@ huggingface-cli download ruv/ruvltra-claude-code
 }
 ```
 
-#### OpenAI Codex
+---
 
-```json
-{
-  "mcpServers": [
-    {
-      "name": "ruvltra",
-      "transport": {
-        "type": "stdio",
-        "command": "node",
-        "args": ["/path/to/ruvltra-mcp-server/dist/index.js"]
-      }
-    }
-  ]
-}
+## English (Current Version)
+
+
+## Architecture
+
+```
+  Claude Code / Gemini CLI / Codex (Command Tower)
+                   |
+             stdio JSON-RPC
+                   v
+  +-------------------------------------------+
+  | MCP Server Core                           |
+  |  - ListTools / CallTool                   |
+  |  - outputSchema + structuredContent       |
+  |                                           |
+  | Tool Handlers (13 tools)                  |
+  |  - code_* / parallel_generate / swarm_*   |
+  |                                           |
+  | Worker Pool (auto-scale 2..8)             |
+  |  - queue backpressure                     |
+  |  - per-task timeout + cancellation        |
+  |  - worker-local SONA                      |
+  |                                           |
+  | Inference Engine (4-stage fallback)       |
+  |  HTTP -> llama.cpp -> RuvLLM -> Mock      |
+  |  + HTTP retry/timeout/circuit breaker     |
+  +-------------------------------------------+
 ```
 
-### 4. Use with HTTP Endpoint (remote model server)
+---
+
+## Key Features
+
+- 13 MCP tools (`code_*`, `parallel_generate`, `swarm_review`, management)
+- WorkerPool auto-scaling (`min..max`) with queue backpressure
+- Per-task timeout and cancellation (`AbortController` based)
+- 4-stage inference fallback with automatic recovery to higher-priority backends
+- HTTP robustness: timeout, retry, circuit breaker (`open/half_open/closed`)
+- SONA self-improvement per worker with disk persistence and reload
+- MCP `outputSchema` + `structuredContent` support for stable machine parsing
+
+---
+
+## Quick Start
 
 ```bash
-# Point to any OpenAI-compatible or llama.cpp server
-export RUVLTRA_HTTP_ENDPOINT="http://localhost:8080/v1/chat/completions"
-export RUVLTRA_HTTP_API_KEY="your-key"
-export RUVLTRA_HTTP_FORMAT="openai"
+npm install
+npm run build
+npm test
+```
 
+Run server:
+
+```bash
 node dist/index.js
 ```
 
----
+Mock backend works out of the box.  
+To use real inference, set at least one backend:
 
-## MCP Tools
-
-### Code Tools
-
-| Tool | Description |
-|------|-------------|
-| `ruvltra_code_generate` | Generate code from natural language description |
-| `ruvltra_code_review` | Review code for bugs, security, performance, style |
-| `ruvltra_code_refactor` | Refactor code while preserving functionality |
-| `ruvltra_code_explain` | Explain complex code in detail |
-| `ruvltra_code_test` | Generate test cases for code |
-| `ruvltra_code_fix` | Fix bugs given code + error message |
-| `ruvltra_code_complete` | Complete partial code from a prefix |
-| `ruvltra_code_translate` | Translate code between languages |
-
-### Parallel / Swarm Tools
-
-| Tool | Description |
-|------|-------------|
-| `ruvltra_parallel_generate` | Generate multiple files concurrently |
-| `ruvltra_swarm_review` | Multi-perspective parallel code review (security, performance, style, etc.) |
-
-### Management Tools
-
-| Tool | Description |
-|------|-------------|
-| `ruvltra_status` | Server status, worker pool metrics |
-| `ruvltra_sona_stats` | SONA self-learning statistics |
-| `ruvltra_scale_workers` | Manually scale worker pool |
+- `RUVLTRA_HTTP_ENDPOINT` (OpenAI-compatible or llama.cpp HTTP)
+- or `RUVLTRA_MODEL_PATH` (GGUF for `node-llama-cpp`)
+- or install/use `@ruvector/ruvllm`
 
 ---
 
-## Inference Backends
+## MCP Client Config Example (Claude Code)
 
-The server supports multiple backends with automatic detection:
+`~/.claude/claude_desktop_config.json`
 
-| Priority | Backend | Requirements | SONA Self-Learning |
-|----------|---------|--------------|---------------------|
-| 1 | HTTP Endpoint | `RUVLTRA_HTTP_ENDPOINT` env var | Application-level |
-| 2 | llama.cpp | `llama-server` binary + GGUF model | Application-level |
-| 3 | RuvLLM Native | `npm install @ruvector/ruvllm` | **Native (full)** |
-| 4 | Mock | None (built-in) | Application-level |
-
-### RuvLLM Native (recommended for self-improvement)
-
-```bash
-npm install @ruvector/ruvllm
+```json
+{
+  "mcpServers": {
+    "ruvltra": {
+      "command": "node",
+      "args": ["/path/to/ruvltra-mcp-server/dist/index.js"],
+      "env": {
+        "RUVLTRA_MIN_WORKERS": "2",
+        "RUVLTRA_MAX_WORKERS": "4",
+        "RUVLTRA_TASK_TIMEOUT_MS": "60000",
+        "RUVLTRA_QUEUE_MAX_LENGTH": "256",
+        "RUVLTRA_LOG_LEVEL": "info"
+      }
+    }
+  }
+}
 ```
 
-When running through RuvLLM, the SONA self-learning system operates at the native level:
-- **Trajectory Learning**: Successful coding sequences are captured and replayed
-- **EWC++**: Elastic Weight Consolidation prevents catastrophic forgetting
-- **MicroLoRA**: Lightweight adaptation without full fine-tuning
-- **<0.05ms latency**: Real-time adaptation
+---
+
+## MCP Tools (13)
+
+### Code tools
+
+- `ruvltra_code_generate`
+- `ruvltra_code_review`
+- `ruvltra_code_refactor`
+- `ruvltra_code_explain`
+- `ruvltra_code_test`
+- `ruvltra_code_fix`
+- `ruvltra_code_complete`
+- `ruvltra_code_translate`
+
+### Parallel / swarm
+
+- `ruvltra_parallel_generate`
+- `ruvltra_swarm_review`
+
+### Management
+
+- `ruvltra_status`
+- `ruvltra_sona_stats`
+- `ruvltra_scale_workers`
+
+All tools now define `outputSchema` and return `structuredContent` (plus `content.text` for compatibility).
 
 ---
 
-## SONA Self-Learning
+## Tool I/O Contract Notes
 
-Each worker maintains its own SONA engine that:
+- Optional `timeoutMs` is accepted by all generation/review style tools.
+- Management tools return structured status/stats objects.
+- `ruvltra_status` includes queue metrics and backend/circuit state.
 
-1. **Extracts Patterns** from every prompt/response pair (language, task type, code structures)
-2. **Scores Trajectories** based on success, token efficiency, and completion quality
-3. **Adapts Patterns** via exponential moving average updates (MicroLoRA-like)
-4. **Protects Memory** via EWC++ to prevent forgetting successful patterns
-5. **Enhances Prompts** by injecting learned pattern hints into future requests
-6. **Consolidates** periodically to prune low-value patterns
+Example `structuredContent` (`ruvltra_code_generate`):
+
+```json
+{
+  "output": "...",
+  "workerId": "worker-2",
+  "backend": "http",
+  "model": "ruvltra-claude-code",
+  "latencyMs": 184,
+  "taskId": "task-173..."
+}
+```
+
+---
+
+## Reliability and Operations
+
+### Queue and backpressure
+
+- `RUVLTRA_QUEUE_MAX_LENGTH` overrun is rejected with a queue overflow error.
+- Status tracks: `rejectedTasks`, `queueLength`, `inFlight`.
+
+### Timeout and cancellation
+
+- Per-task timeout via `RUVLTRA_TASK_TIMEOUT_MS` or per-tool `timeoutMs`.
+- Timeout triggers cancellation and immediate task failure.
+
+### HTTP resilience
+
+- `RUVLTRA_HTTP_TIMEOUT_MS`
+- `RUVLTRA_HTTP_MAX_RETRIES`
+- `RUVLTRA_HTTP_RETRY_BASE_MS`
+- `RUVLTRA_HTTP_CIRCUIT_FAILURE_THRESHOLD`
+- `RUVLTRA_HTTP_CIRCUIT_COOLDOWN_MS`
+
+Circuit opens after consecutive failures, then probes again after cooldown.
+
+### SONA persistence
+
+- `RUVLTRA_SONA_STATE_DIR` (default: `./.ruvltra-state/sona`)
+- `RUVLTRA_SONA_PERSIST_INTERVAL` (interactions per flush)
 
 ---
 
 ## Environment Variables
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `RUVLTRA_MODEL_PATH` | `~/.ruvltra/models/...gguf` | Path to GGUF model file |
-| `RUVLTRA_HTTP_ENDPOINT` | - | HTTP inference endpoint URL |
-| `RUVLTRA_HTTP_API_KEY` | - | API key for HTTP endpoint |
-| `RUVLTRA_HTTP_MODEL` | `ruvltra-claude-code` | Model name for HTTP endpoint |
-| `RUVLTRA_HTTP_FORMAT` | auto | `openai` or `llama` |
-| `RUVLTRA_MAX_WORKERS` | `8` | Maximum parallel workers |
-| `RUVLTRA_MIN_WORKERS` | `2` | Minimum workers |
-| `RUVLTRA_CONTEXT_LENGTH` | `4096` | Context window (tokens) |
-| `RUVLTRA_GPU_LAYERS` | `-1` | GPU layers (-1 = all, 0 = CPU) |
-| `RUVLTRA_THREADS` | `0` | CPU threads (0 = auto) |
+|---|---:|---|
+| `RUVLTRA_MIN_WORKERS` | `2` | Minimum worker count |
+| `RUVLTRA_MAX_WORKERS` | `8` | Maximum worker count |
+| `RUVLTRA_INITIAL_WORKERS` | `2` | Initial worker count |
+| `RUVLTRA_QUEUE_MAX_LENGTH` | `256` | Max queued tasks before backpressure |
+| `RUVLTRA_TASK_TIMEOUT_MS` | `60000` | Default per-task timeout |
+| `RUVLTRA_SONA_ENABLED` | `true` | Enable SONA |
+| `RUVLTRA_SONA_STATE_DIR` | `./.ruvltra-state/sona` | SONA state directory |
+| `RUVLTRA_SONA_PERSIST_INTERVAL` | `10` | Persist every N interactions |
+| `RUVLTRA_HTTP_ENDPOINT` | - | HTTP inference endpoint |
+| `RUVLTRA_HTTP_API_KEY` | - | HTTP API key |
+| `RUVLTRA_HTTP_MODEL` | `ruvltra-claude-code` | HTTP model name |
+| `RUVLTRA_HTTP_FORMAT` | `auto` | `openai` or `llama` |
+| `RUVLTRA_HTTP_TIMEOUT_MS` | `15000` | HTTP timeout |
+| `RUVLTRA_HTTP_MAX_RETRIES` | `2` | HTTP retry count |
+| `RUVLTRA_HTTP_RETRY_BASE_MS` | `250` | Retry backoff base |
+| `RUVLTRA_HTTP_CIRCUIT_FAILURE_THRESHOLD` | `5` | Failures before opening circuit |
+| `RUVLTRA_HTTP_CIRCUIT_COOLDOWN_MS` | `30000` | Circuit cooldown |
+| `RUVLTRA_MODEL_PATH` | auto-search | Local GGUF model path |
+| `RUVLTRA_CONTEXT_LENGTH` | `4096` | Context tokens |
+| `RUVLTRA_GPU_LAYERS` | `-1` | llama.cpp GPU layers |
+| `RUVLTRA_THREADS` | `0` | llama.cpp thread count (0=auto) |
 | `RUVLTRA_MAX_TOKENS` | `512` | Default max generation tokens |
-| `RUVLTRA_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `RUVLTRA_SONA_ENABLED` | `true` | Enable SONA self-learning |
-| `RUVLTRA_CONFIG` | - | Path to config JSON file |
-| `LLAMA_CPP_PATH` | - | Path to llama.cpp installation |
-
----
-
-## Usage Pattern: Vibe Coding Acceleration
-
-```
-User: "APIサーバーをTypeScriptで作って"
-           │
-           ▼
-  Claude Code (指示塔)
-  ├── タスク分解:
-  │   ├── server.ts     → ruvltra_parallel_generate
-  │   ├── routes.ts     → (並列実行)
-  │   ├── middleware.ts  → (並列実行)
-  │   ├── types.ts      → (並列実行)
-  │   └── tests/        → (並列実行)
-  │
-  ├── レビュー:
-  │   └── 全ファイル    → ruvltra_swarm_review (3並列)
-  │
-  └── 結果統合 → User へ返却
-```
-
-The AI agent (Claude Code) acts as the **command tower** that:
-1. Receives the user's high-level request
-2. Breaks it down into parallelizable sub-tasks
-3. Dispatches them to RuvLTRA workers via MCP tools
-4. Consolidates results and presents them to the user
-
-This architecture enables **10-50x faster** multi-file generation compared to sequential processing.
+| `RUVLTRA_TEMPERATURE` | `0.2` | Default temperature |
+| `RUVLTRA_MOCK_LATENCY_MS` | `120` | Mock backend latency |
+| `RUVLTRA_LOG_LEVEL` | `info` | `debug/info/warn/error` |
+| `RUVLTRA_CONFIG` | - | Optional JSON config file |
+| `LLAMA_CPP_PATH` | - | Optional llama.cpp path hint |
 
 ---
 
 ## Testing
 
 ```bash
-# Build
-npm run build
+# full suite
+npm test
 
-# Run integration tests
-npx tsx tests/integration.test.ts
+# targeted
+npm run test:smoke
+npm run test:pool
+npm run test:resilience
+npm run test:sona
+npm run test:parallel
+
+# build
+npm run build
+```
+
+Current tests cover:
+
+- MCP smoke and structured output checks
+- queue backpressure and timeout/cancel behavior
+- HTTP retry and circuit-breaker recovery path
+- SONA persistence and reload
+
+CI is configured in [ci.yml](.github/workflows/ci.yml).
+
+---
+
+## Publishing
+
+### 1. Local preflight
+
+```bash
+npm ci
+npm test
+npm run build
+npm pack
+```
+
+`prepublishOnly` already enforces `npm test && npm run build`.
+
+### 2. Manual publish
+
+```bash
+npm publish --access public --provenance
+```
+
+### 3. CI publish (recommended)
+
+- Tag release: `vX.Y.Z`
+- Push tag to GitHub
+- [publish.yml](.github/workflows/publish.yml) runs test/build/publish
+- Required secret: `NPM_TOKEN`
+
+### 4. Install and run
+
+```bash
+npx -y ruvltra-mcp-server
+```
+
+or in MCP config:
+
+```json
+{
+  "command": "npx",
+  "args": ["-y", "ruvltra-mcp-server"]
+}
 ```
 
 ---
@@ -290,31 +348,27 @@ npx tsx tests/integration.test.ts
 ## Project Structure
 
 ```
-ruvltra-mcp-server/
-  src/
-    index.ts                    # Entry point
-    types.ts                    # All TypeScript interfaces
-    core/
-      mcp-server.ts             # MCP protocol handler (JSON-RPC/stdio)
-    tools/
-      definitions.ts            # MCP tool schemas
-      handlers.ts               # Tool execution logic
-    workers/
-      worker-pool.ts            # Parallel worker orchestration
-    ruvllm/
-      inference-engine.ts       # Model inference (multi-backend)
-      sona-engine.ts            # SONA self-learning engine
-    config/
-      defaults.ts               # Configuration management
-    utils/
-      logger.ts                 # Structured logging (stderr)
-      event-bus.ts              # Internal event system
-  examples/
-    claude-code-config.json     # Claude Code MCP config
-    gemini-cli-config.json      # Gemini CLI MCP config
-    codex-config.json           # Codex MCP config
-  tests/
-    integration.test.ts         # Integration tests
-  ruvltra.config.json           # Default server config
-  ruvltra.config.schema.json    # JSON Schema for config
+src/
+  index.ts
+  types.ts
+  core/
+    mcp-server.ts
+  tools/
+    definitions.ts
+    handlers.ts
+  workers/
+    worker-pool.ts
+  ruvllm/
+    inference-engine.ts
+    sona-engine.ts
+  config/
+    defaults.ts
+  utils/
+    logger.ts
+tests/
+  test-mcp.ts
+  test-parallel.ts
+  test-timeout-backpressure.ts
+  test-http-resilience.ts
+  test-sona-persist.ts
 ```

@@ -7,22 +7,27 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 
-import { TOOL_DEFINITIONS } from '../tools/definitions.js';
-import { InferenceEngine } from '../ruvllm/inference-engine.js';
-import { ServerConfig } from '../types.js';
+import { isToolName, TOOL_DEFINITIONS } from '../tools/definitions.js';
+import { ToolHandlers, ToolInputError } from '../tools/handlers.js';
+import { ServerConfig, ToolName } from '../types.js';
+import { Logger } from '../utils/logger.js';
+import { WorkerPool } from '../workers/worker-pool.js';
 
 export class RuvltraMcpServer {
   private server: Server;
-  private inferenceEngine: InferenceEngine;
-  private config: ServerConfig;
+  private readonly config: ServerConfig;
+  private readonly logger: Logger;
+  private readonly workerPool: WorkerPool;
+  private readonly toolHandlers: ToolHandlers;
 
   constructor(config: ServerConfig) {
     this.config = config;
-    
+    this.logger = new Logger(config.logLevel, 'mcp');
+
     this.server = new Server(
       {
         name: 'ruvltra-mcp-server',
-        version: '0.1.0',
+        version: '0.2.0',
       },
       {
         capabilities: {
@@ -31,13 +36,11 @@ export class RuvltraMcpServer {
       }
     );
 
-    // Initialize the engine (Mocking @ruvector/ruvllm for this PoC)
-    this.inferenceEngine = new InferenceEngine({
-      sonaEnabled: this.config.sonaEnabled,
-      endpoint: this.config.httpEndpoint
-    });
+    this.workerPool = new WorkerPool(this.config, this.logger.child('pool'));
+    this.toolHandlers = new ToolHandlers(this.workerPool, this.logger.child('tools'));
 
     this.setupHandlers();
+    this.setupSignalHandlers();
   }
 
   private setupHandlers() {
@@ -48,63 +51,61 @@ export class RuvltraMcpServer {
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
 
-      if (!args) {
-        throw new McpError(ErrorCode.InvalidParams, 'Arguments are required');
+      if (!isToolName(name)) {
+        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
       }
 
       try {
-        switch (name) {
-          case 'ruvltra_code_generate': {
-            const { instruction, context } = args as any;
-            const result = await this.inferenceEngine.generate(instruction, context);
-            return {
-              content: [{ type: 'text', text: result }],
-            };
-          }
-
-          case 'ruvltra_code_refactor': {
-            const { code, instruction } = args as any;
-            const result = await this.inferenceEngine.refactor(code, instruction);
-            return {
-              content: [{ type: 'text', text: result }],
-            };
-          }
-
-          case 'ruvltra_parallel_generate': {
-            const { tasks } = args as any;
-            if (!Array.isArray(tasks)) {
-               throw new McpError(ErrorCode.InvalidParams, 'Tasks must be an array');
-            }
-            // Execute in parallel
-            const promises = tasks.map(async (task: any) => {
-                const code = await this.inferenceEngine.generate(task.instruction, task.context);
-                return `File: ${task.filePath}\\n---\\n${code}\\n`;
-            });
-            const results = await Promise.all(promises);
-            return {
-              content: [{ type: 'text', text: results.join('\\n\\n') }],
-            };
-          }
-
-          default:
-            throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
-        }
-      } catch (error: any) {
-        console.error(`Error executing tool ${name}:`, error);
+        const result = await this.toolHandlers.execute(name as ToolName, args ?? {});
         return {
-          content: [{ type: 'text', text: `Error: ${error.message}` }],
+          content: [{ type: 'text', text: result.text }],
+          ...(result.structuredContent
+            ? { structuredContent: result.structuredContent }
+            : {}),
+          ...(result.isError ? { isError: true } : {}),
+        };
+      } catch (error) {
+        if (error instanceof ToolInputError) {
+          throw new McpError(ErrorCode.InvalidParams, error.message);
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.error(`Tool execution failed for ${name}`, { error: message });
+
+        return {
+          content: [{ type: 'text', text: `Error executing ${name}: ${message}` }],
           isError: true,
         };
       }
     });
 
-    this.server.onerror = (error) => console.error('[MCP Error]', error);
+    this.server.onerror = (error) => this.logger.error('MCP runtime error', error);
+  }
+
+  private setupSignalHandlers(): void {
+    const shutdown = async (signal: string): Promise<void> => {
+      this.logger.info(`Received ${signal}, shutting down`);
+      await this.workerPool.shutdown();
+      process.exit(0);
+    };
+
+    process.once('SIGINT', () => {
+      void shutdown('SIGINT');
+    });
+    process.once('SIGTERM', () => {
+      void shutdown('SIGTERM');
+    });
   }
 
   async run() {
-    await this.inferenceEngine.initialize(this.config.modelPath);
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error(`[RuvLTRA] MCP Server running on stdio (SONA: ${this.config.sonaEnabled})`);
+    const status = this.workerPool.getStatus();
+    this.logger.info('MCP server running on stdio', {
+      workers: status.currentWorkers,
+      minWorkers: status.minWorkers,
+      maxWorkers: status.maxWorkers,
+      sonaEnabled: this.config.sonaEnabled,
+    });
   }
 }
