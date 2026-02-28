@@ -1177,17 +1177,37 @@ var InferenceEngine = class {
         imported = cjsRequire("@ruvector/ruvllm");
       }
       const moduleRecord = imported.default ?? imported;
+      const ruvllmModelId = process.env.RUVLTRA_RUVLLM_MODEL ?? "ruvltra-claude-code";
+      let modelPath = this.config.modelPath;
+      if (!modelPath) {
+        const downloadModel = moduleRecord.downloadModel;
+        const isModelDownloaded = moduleRecord.isModelDownloaded;
+        if (downloadModel) {
+          const alreadyDownloaded = isModelDownloaded?.(ruvllmModelId) ?? false;
+          if (!alreadyDownloaded) {
+            this.logger.info(`Downloading RuvLLM model: ${ruvllmModelId}...`);
+          }
+          try {
+            modelPath = await downloadModel(ruvllmModelId);
+            this.logger.info(`RuvLLM model ready: ${modelPath}`);
+          } catch (dlError) {
+            const dlMsg = dlError instanceof Error ? dlError.message : String(dlError);
+            this.logger.warn(`Model download failed (${ruvllmModelId}): ${dlMsg}`);
+          }
+        }
+      }
       let client = null;
       const RuvLLMClass = moduleRecord.RuvLLM;
       const createClient = moduleRecord.createClient;
       if (RuvLLMClass) {
         client = new RuvLLMClass({
           learningEnabled: this.config.sonaEnabled,
-          model: this.config.modelPath ?? this.config.httpModel
+          modelPath,
+          model: modelPath ?? this.config.httpModel
         });
       } else if (createClient) {
         client = await createClient({
-          model: this.config.modelPath ?? this.config.httpModel
+          model: modelPath ?? this.config.httpModel
         });
       }
       const TrajectoryBuilder = moduleRecord.TrajectoryBuilder;

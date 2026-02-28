@@ -538,6 +538,34 @@ export class InferenceEngine {
       const moduleRecord =
         (imported.default as Record<string, unknown> | undefined) ?? imported;
 
+      // モデルの自動ダウンロード（modelPath が未指定の場合）
+      const ruvllmModelId = process.env.RUVLTRA_RUVLLM_MODEL ?? 'ruvltra-claude-code';
+      let modelPath = this.config.modelPath;
+
+      if (!modelPath) {
+        const downloadModel = moduleRecord.downloadModel as
+          | ((modelId: string) => Promise<string>)
+          | undefined;
+        const isModelDownloaded = moduleRecord.isModelDownloaded as
+          | ((modelId: string) => boolean)
+          | undefined;
+
+        if (downloadModel) {
+          const alreadyDownloaded = isModelDownloaded?.(ruvllmModelId) ?? false;
+          if (!alreadyDownloaded) {
+            this.logger.info(`Downloading RuvLLM model: ${ruvllmModelId}...`);
+          }
+          try {
+            modelPath = await downloadModel(ruvllmModelId);
+            this.logger.info(`RuvLLM model ready: ${modelPath}`);
+          } catch (dlError) {
+            const dlMsg = dlError instanceof Error ? dlError.message : String(dlError);
+            this.logger.warn(`Model download failed (${ruvllmModelId}): ${dlMsg}`);
+            // ダウンロード失敗でもモデルなしで初期化を試みる
+          }
+        }
+      }
+
       let client: unknown = null;
 
       const RuvLLMClass = moduleRecord.RuvLLM as
@@ -551,11 +579,12 @@ export class InferenceEngine {
       if (RuvLLMClass) {
         client = new RuvLLMClass({
           learningEnabled: this.config.sonaEnabled,
-          model: this.config.modelPath ?? this.config.httpModel,
+          modelPath,
+          model: modelPath ?? this.config.httpModel,
         });
       } else if (createClient) {
         client = await createClient({
-          model: this.config.modelPath ?? this.config.httpModel,
+          model: modelPath ?? this.config.httpModel,
         });
       }
 
