@@ -9,10 +9,13 @@ interface ToolDefinition {
   outputSchema?: JsonSchema;
 }
 
+const ENGLISH_INPUT_NOTE =
+  'For best output quality, provide instructions and context in English.';
+
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'ruvltra_code_generate',
-    description: 'Generate code from instruction and context.',
+    description: `Generate code from instruction and context. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -43,7 +46,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'ruvltra_code_review',
     description:
-      'Review code for bugs, security, performance, correctness, and maintainability.',
+      `Review code for bugs, security, performance, correctness, and maintainability. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -71,7 +74,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: 'ruvltra_code_refactor',
-    description: 'Refactor code while preserving behavior.',
+    description: `Refactor code while preserving behavior. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -96,7 +99,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: 'ruvltra_code_explain',
-    description: 'Explain code clearly for a given audience.',
+    description: `Explain code clearly for a given audience. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -121,7 +124,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: 'ruvltra_code_test',
-    description: 'Generate tests for provided code.',
+    description: `Generate tests for provided code. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -146,7 +149,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: 'ruvltra_code_fix',
-    description: 'Fix code using error details and optional guidance.',
+    description: `Fix code using error details and optional guidance. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -172,7 +175,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: 'ruvltra_code_complete',
-    description: 'Complete partial code from prefix/suffix.',
+    description: `Complete partial code from prefix/suffix. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -197,7 +200,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: 'ruvltra_code_translate',
-    description: 'Translate code between programming languages.',
+    description: `Translate code between programming languages. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -222,7 +225,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: 'ruvltra_parallel_generate',
-    description: 'Generate multiple files concurrently through the worker pool.',
+    description: `Generate multiple files concurrently through the worker pool. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -257,7 +260,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: 'ruvltra_swarm_review',
-    description: 'Run multi-perspective parallel code reviews (up to 8 perspectives).',
+    description: `Run multi-perspective parallel code reviews (up to 8 perspectives). ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: 'object',
       properties: {

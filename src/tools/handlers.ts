@@ -8,6 +8,12 @@ const DEFAULT_SWARM_PERSPECTIVES = [
   'quality',
   'maintainability',
 ];
+const MAX_INSTRUCTION_CHARS = 10_000;
+const MAX_CONTEXT_CHARS = 16_000;
+const CODE_ONLY_INSTRUCTION_RE =
+  /(code only|only code|return only .*code|output only .*code|no markdown|without markdown|no explanation|without explanation|no code fence|without code fence|コードのみ|説明なし|説明不要|コードフェンスなし|```なし|関数本体のみ|本体のみ)/i;
+const FUNCTION_BODY_ONLY_RE =
+  /(function body only|only function body|return function body only|関数本体のみ|本体のみ)/i;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -72,9 +78,10 @@ export class ToolHandlers {
       temperature: this.optionalNumber(input, 'temperature'),
       timeoutMs: this.optionalInteger(input, 'timeoutMs'),
     });
+    const normalizedOutput = this.applyOutputConstraints(result.text, instruction);
 
     return this.wrapResult({
-      output: result.text,
+      output: normalizedOutput,
       workerId: result.workerId,
       backend: result.backend,
       model: result.model,
@@ -129,9 +136,10 @@ export class ToolHandlers {
       language: this.optionalString(input, 'language'),
       timeoutMs: this.optionalInteger(input, 'timeoutMs'),
     });
+    const normalizedOutput = this.applyOutputConstraints(result.text, fullInstruction);
 
     return this.wrapResult({
-      refactored: result.text,
+      refactored: normalizedOutput,
       workerId: result.workerId,
       backend: result.backend,
       latencyMs: result.latencyMs,
@@ -180,9 +188,10 @@ export class ToolHandlers {
       language: this.optionalString(input, 'language'),
       timeoutMs: this.optionalInteger(input, 'timeoutMs'),
     });
+    const normalizedOutput = this.applyOutputConstraints(result.text, instruction);
 
     return this.wrapResult({
-      tests: result.text,
+      tests: normalizedOutput,
       workerId: result.workerId,
       backend: result.backend,
       latencyMs: result.latencyMs,
@@ -211,9 +220,10 @@ export class ToolHandlers {
       language: this.optionalString(input, 'language'),
       timeoutMs: this.optionalInteger(input, 'timeoutMs'),
     });
+    const normalizedOutput = this.applyOutputConstraints(result.text, fullInstruction);
 
     return this.wrapResult({
-      fix: result.text,
+      fix: normalizedOutput,
       workerId: result.workerId,
       backend: result.backend,
       latencyMs: result.latencyMs,
@@ -242,9 +252,10 @@ export class ToolHandlers {
       language: this.optionalString(input, 'language'),
       timeoutMs: this.optionalInteger(input, 'timeoutMs'),
     });
+    const normalizedOutput = this.applyOutputConstraints(result.text, instruction);
 
     return this.wrapResult({
-      completion: result.text,
+      completion: normalizedOutput,
       workerId: result.workerId,
       backend: result.backend,
       latencyMs: result.latencyMs,
@@ -272,9 +283,10 @@ export class ToolHandlers {
       language: targetLanguage,
       timeoutMs: this.optionalInteger(input, 'timeoutMs'),
     });
+    const normalizedOutput = this.applyOutputConstraints(result.text, instruction);
 
     return this.wrapResult({
-      translated: result.text,
+      translated: normalizedOutput,
       workerId: result.workerId,
       backend: result.backend,
       latencyMs: result.latencyMs,
@@ -304,7 +316,7 @@ export class ToolHandlers {
     const startedAt = Date.now();
     const results = await Promise.all(
       tasks.map(async (task) => {
-        const generation = await this.workerPool.executeTask({
+        const generation = await this.runSingleTask({
           taskType: 'generate',
           instruction: task.instruction,
           context: task.context,
@@ -312,10 +324,14 @@ export class ToolHandlers {
           filePath: task.filePath,
           timeoutMs: this.optionalInteger(input, 'timeoutMs'),
         });
+        const normalizedContent = this.applyOutputConstraints(
+          generation.text,
+          task.instruction
+        );
 
         return {
           filePath: task.filePath,
-          content: generation.text,
+          content: normalizedContent,
           workerId: generation.workerId,
           backend: generation.backend,
           latencyMs: generation.latencyMs,
@@ -408,7 +424,213 @@ export class ToolHandlers {
     temperature?: number;
     timeoutMs?: number;
   }): Promise<WorkerTaskResult> {
-    return this.workerPool.executeTask(params);
+    const prepared = this.prepareModelInput(params);
+    return this.workerPool.executeTask({
+      ...params,
+      instruction: prepared.instruction,
+      context: prepared.context,
+    });
+  }
+
+  private prepareModelInput(params: {
+    taskType:
+      | 'generate'
+      | 'review'
+      | 'refactor'
+      | 'explain'
+      | 'test'
+      | 'fix'
+      | 'complete'
+      | 'translate';
+    instruction: string;
+    context?: string;
+    language?: string;
+    filePath?: string;
+  }): { instruction: string; context?: string } {
+    const instruction = this.limitText(params.instruction.trim(), MAX_INSTRUCTION_CHARS);
+    const context =
+      params.context !== undefined
+        ? this.limitText(params.context.trim(), MAX_CONTEXT_CHARS)
+        : undefined;
+
+    const languageHint = this.inferLanguageHint([instruction, context].filter(Boolean).join('\n'));
+    const envelope = [
+      `ExecutionProfile: ${params.taskType}`,
+      'ReasoningPolicy: compact, deterministic, implementation-first.',
+      languageHint === 'english'
+        ? 'InputLanguageHint: likely English.'
+        : 'InputLanguageHint: likely non-English. Translate internally to concise English before solving.',
+      'OutputPolicy: do not mention internal translation, profiles, or hidden steps.',
+      '',
+      'UserInstruction:',
+      instruction,
+    ].join('\n');
+
+    const preparedContext =
+      context && context.length > 0
+        ? ['NormalizedContext:', context].join('\n')
+        : undefined;
+
+    return {
+      instruction: envelope,
+      context: preparedContext,
+    };
+  }
+
+  private applyOutputConstraints(output: string, instruction: string): string {
+    if (!CODE_ONLY_INSTRUCTION_RE.test(instruction)) {
+      return output;
+    }
+
+    let normalized = output.trim();
+    const fenced = this.extractFirstFencedCodeBlock(normalized);
+    if (fenced) {
+      normalized = fenced.trim();
+    } else {
+      normalized = this.stripFenceMarkers(normalized).trim();
+      const likelyCode = this.extractLikelyCodeSnippet(normalized);
+      if (likelyCode) {
+        normalized = likelyCode.trim();
+      }
+    }
+
+    if (FUNCTION_BODY_ONLY_RE.test(instruction)) {
+      const bodyOnly = this.extractFunctionBody(normalized);
+      if (bodyOnly) {
+        normalized = bodyOnly.trim();
+      }
+    }
+
+    return normalized;
+  }
+
+  private extractFirstFencedCodeBlock(text: string): string | undefined {
+    const match = text.match(/```[^\n]*\n([\s\S]*?)```/);
+    return match?.[1];
+  }
+
+  private stripFenceMarkers(text: string): string {
+    return text.replace(/```[^\n]*\n?/g, '').replace(/```/g, '');
+  }
+
+  private extractLikelyCodeSnippet(text: string): string | undefined {
+    const lines = text.split(/\r?\n/);
+    let firstCodeLine = -1;
+    let lastCodeLine = -1;
+
+    lines.forEach((line, index) => {
+      if (this.isCodeLikeLine(line.trim())) {
+        if (firstCodeLine === -1) {
+          firstCodeLine = index;
+        }
+        lastCodeLine = index;
+      }
+    });
+
+    if (firstCodeLine === -1 || lastCodeLine === -1) {
+      return undefined;
+    }
+
+    const candidate = lines.slice(firstCodeLine, lastCodeLine + 1);
+    const filtered = candidate.filter((line) => {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) {
+        return true;
+      }
+      if (this.isCodeLikeLine(trimmed)) {
+        return true;
+      }
+      return !this.isLikelyProseLine(trimmed);
+    });
+
+    const joined = filtered.join('\n').trim();
+    return joined.length > 0 ? joined : undefined;
+  }
+
+  private isCodeLikeLine(line: string): boolean {
+    if (line.length === 0) {
+      return false;
+    }
+    if (/^(function|const|let|var|class|interface|type|enum|import|export|if|for|while|switch|return|async|await|try|catch|finally|public|private|protected|def|fn)\b/.test(line)) {
+      return true;
+    }
+    if (/^(\/\/|\/\*|\*|#)/.test(line)) {
+      return true;
+    }
+    if (/[{}()[\];=<>]/.test(line) || line.includes('=>')) {
+      return true;
+    }
+    return false;
+  }
+
+  private isLikelyProseLine(line: string): boolean {
+    if (line.length === 0) {
+      return false;
+    }
+    if (this.isCodeLikeLine(line)) {
+      return false;
+    }
+    const words = line.split(/\s+/).filter((word) => word.length > 0).length;
+    return words >= 5;
+  }
+
+  private extractFunctionBody(text: string): string | undefined {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) {
+      return undefined;
+    }
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      return trimmed.slice(1, -1).trim();
+    }
+
+    const openIndex = trimmed.indexOf('{');
+    if (openIndex < 0) {
+      return undefined;
+    }
+
+    let depth = 0;
+    let closeIndex = -1;
+    for (let index = openIndex; index < trimmed.length; index += 1) {
+      const char = trimmed[index];
+      if (char === '{') {
+        depth += 1;
+      } else if (char === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          closeIndex = index;
+          break;
+        }
+      }
+    }
+
+    if (closeIndex <= openIndex) {
+      return undefined;
+    }
+
+    return trimmed.slice(openIndex + 1, closeIndex).trim();
+  }
+
+  private limitText(text: string, maxChars: number): string {
+    if (text.length <= maxChars) {
+      return text;
+    }
+
+    const headLength = Math.floor(maxChars * 0.7);
+    const tailLength = maxChars - headLength;
+    const head = text.slice(0, headLength).trimEnd();
+    const tail = text.slice(-tailLength).trimStart();
+    return `${head}\n\n[...truncated...]\n\n${tail}`;
+  }
+
+  private inferLanguageHint(text: string): 'english' | 'non_english' {
+    if (text.length === 0) {
+      return 'english';
+    }
+
+    const asciiMatches = text.match(/[A-Za-z0-9\s.,:;!?'"`~!@#$%^&*()_+\-=[\]{}|\\/<>]/g);
+    const asciiCount = asciiMatches ? asciiMatches.length : 0;
+    const ratio = asciiCount / text.length;
+    return ratio >= 0.9 ? 'english' : 'non_english';
   }
 
   private wrapResult(payload: unknown): ToolExecutionResult {

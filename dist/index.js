@@ -11,10 +11,11 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 // src/tools/definitions.ts
+var ENGLISH_INPUT_NOTE = "For best output quality, provide instructions and context in English.";
 var TOOL_DEFINITIONS = [
   {
     name: "ruvltra_code_generate",
-    description: "Generate code from instruction and context.",
+    description: `Generate code from instruction and context. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -44,7 +45,7 @@ var TOOL_DEFINITIONS = [
   },
   {
     name: "ruvltra_code_review",
-    description: "Review code for bugs, security, performance, correctness, and maintainability.",
+    description: `Review code for bugs, security, performance, correctness, and maintainability. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -72,7 +73,7 @@ var TOOL_DEFINITIONS = [
   },
   {
     name: "ruvltra_code_refactor",
-    description: "Refactor code while preserving behavior.",
+    description: `Refactor code while preserving behavior. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -97,7 +98,7 @@ var TOOL_DEFINITIONS = [
   },
   {
     name: "ruvltra_code_explain",
-    description: "Explain code clearly for a given audience.",
+    description: `Explain code clearly for a given audience. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -122,7 +123,7 @@ var TOOL_DEFINITIONS = [
   },
   {
     name: "ruvltra_code_test",
-    description: "Generate tests for provided code.",
+    description: `Generate tests for provided code. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -147,7 +148,7 @@ var TOOL_DEFINITIONS = [
   },
   {
     name: "ruvltra_code_fix",
-    description: "Fix code using error details and optional guidance.",
+    description: `Fix code using error details and optional guidance. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -173,7 +174,7 @@ var TOOL_DEFINITIONS = [
   },
   {
     name: "ruvltra_code_complete",
-    description: "Complete partial code from prefix/suffix.",
+    description: `Complete partial code from prefix/suffix. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -198,7 +199,7 @@ var TOOL_DEFINITIONS = [
   },
   {
     name: "ruvltra_code_translate",
-    description: "Translate code between programming languages.",
+    description: `Translate code between programming languages. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -223,7 +224,7 @@ var TOOL_DEFINITIONS = [
   },
   {
     name: "ruvltra_parallel_generate",
-    description: "Generate multiple files concurrently through the worker pool.",
+    description: `Generate multiple files concurrently through the worker pool. ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -258,7 +259,7 @@ var TOOL_DEFINITIONS = [
   },
   {
     name: "ruvltra_swarm_review",
-    description: "Run multi-perspective parallel code reviews (up to 8 perspectives).",
+    description: `Run multi-perspective parallel code reviews (up to 8 perspectives). ${ENGLISH_INPUT_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -350,6 +351,10 @@ var DEFAULT_SWARM_PERSPECTIVES = [
   "quality",
   "maintainability"
 ];
+var MAX_INSTRUCTION_CHARS = 1e4;
+var MAX_CONTEXT_CHARS = 16e3;
+var CODE_ONLY_INSTRUCTION_RE = /(code only|only code|return only .*code|output only .*code|no markdown|without markdown|no explanation|without explanation|no code fence|without code fence|コードのみ|説明なし|説明不要|コードフェンスなし|```なし|関数本体のみ|本体のみ)/i;
+var FUNCTION_BODY_ONLY_RE = /(function body only|only function body|return function body only|関数本体のみ|本体のみ)/i;
 function isRecord(value) {
   return typeof value === "object" && value !== null;
 }
@@ -407,8 +412,9 @@ var ToolHandlers = class {
       temperature: this.optionalNumber(input, "temperature"),
       timeoutMs: this.optionalInteger(input, "timeoutMs")
     });
+    const normalizedOutput = this.applyOutputConstraints(result.text, instruction);
     return this.wrapResult({
-      output: result.text,
+      output: normalizedOutput,
       workerId: result.workerId,
       backend: result.backend,
       model: result.model,
@@ -456,8 +462,9 @@ var ToolHandlers = class {
       language: this.optionalString(input, "language"),
       timeoutMs: this.optionalInteger(input, "timeoutMs")
     });
+    const normalizedOutput = this.applyOutputConstraints(result.text, fullInstruction);
     return this.wrapResult({
-      refactored: result.text,
+      refactored: normalizedOutput,
       workerId: result.workerId,
       backend: result.backend,
       latencyMs: result.latencyMs
@@ -501,8 +508,9 @@ var ToolHandlers = class {
       language: this.optionalString(input, "language"),
       timeoutMs: this.optionalInteger(input, "timeoutMs")
     });
+    const normalizedOutput = this.applyOutputConstraints(result.text, instruction);
     return this.wrapResult({
-      tests: result.text,
+      tests: normalizedOutput,
       workerId: result.workerId,
       backend: result.backend,
       latencyMs: result.latencyMs
@@ -526,8 +534,9 @@ var ToolHandlers = class {
       language: this.optionalString(input, "language"),
       timeoutMs: this.optionalInteger(input, "timeoutMs")
     });
+    const normalizedOutput = this.applyOutputConstraints(result.text, fullInstruction);
     return this.wrapResult({
-      fix: result.text,
+      fix: normalizedOutput,
       workerId: result.workerId,
       backend: result.backend,
       latencyMs: result.latencyMs
@@ -552,8 +561,9 @@ var ToolHandlers = class {
       language: this.optionalString(input, "language"),
       timeoutMs: this.optionalInteger(input, "timeoutMs")
     });
+    const normalizedOutput = this.applyOutputConstraints(result.text, instruction);
     return this.wrapResult({
-      completion: result.text,
+      completion: normalizedOutput,
       workerId: result.workerId,
       backend: result.backend,
       latencyMs: result.latencyMs
@@ -576,8 +586,9 @@ var ToolHandlers = class {
       language: targetLanguage,
       timeoutMs: this.optionalInteger(input, "timeoutMs")
     });
+    const normalizedOutput = this.applyOutputConstraints(result.text, instruction);
     return this.wrapResult({
-      translated: result.text,
+      translated: normalizedOutput,
       workerId: result.workerId,
       backend: result.backend,
       latencyMs: result.latencyMs
@@ -602,7 +613,7 @@ var ToolHandlers = class {
     const startedAt = Date.now();
     const results = await Promise.all(
       tasks.map(async (task) => {
-        const generation = await this.workerPool.executeTask({
+        const generation = await this.runSingleTask({
           taskType: "generate",
           instruction: task.instruction,
           context: task.context,
@@ -610,9 +621,13 @@ var ToolHandlers = class {
           filePath: task.filePath,
           timeoutMs: this.optionalInteger(input, "timeoutMs")
         });
+        const normalizedContent = this.applyOutputConstraints(
+          generation.text,
+          task.instruction
+        );
         return {
           filePath: task.filePath,
-          content: generation.text,
+          content: normalizedContent,
           workerId: generation.workerId,
           backend: generation.backend,
           latencyMs: generation.latencyMs
@@ -676,7 +691,169 @@ var ToolHandlers = class {
     });
   }
   async runSingleTask(params) {
-    return this.workerPool.executeTask(params);
+    const prepared = this.prepareModelInput(params);
+    return this.workerPool.executeTask({
+      ...params,
+      instruction: prepared.instruction,
+      context: prepared.context
+    });
+  }
+  prepareModelInput(params) {
+    const instruction = this.limitText(params.instruction.trim(), MAX_INSTRUCTION_CHARS);
+    const context = params.context !== void 0 ? this.limitText(params.context.trim(), MAX_CONTEXT_CHARS) : void 0;
+    const languageHint = this.inferLanguageHint([instruction, context].filter(Boolean).join("\n"));
+    const envelope = [
+      `ExecutionProfile: ${params.taskType}`,
+      "ReasoningPolicy: compact, deterministic, implementation-first.",
+      languageHint === "english" ? "InputLanguageHint: likely English." : "InputLanguageHint: likely non-English. Translate internally to concise English before solving.",
+      "OutputPolicy: do not mention internal translation, profiles, or hidden steps.",
+      "",
+      "UserInstruction:",
+      instruction
+    ].join("\n");
+    const preparedContext = context && context.length > 0 ? ["NormalizedContext:", context].join("\n") : void 0;
+    return {
+      instruction: envelope,
+      context: preparedContext
+    };
+  }
+  applyOutputConstraints(output, instruction) {
+    if (!CODE_ONLY_INSTRUCTION_RE.test(instruction)) {
+      return output;
+    }
+    let normalized = output.trim();
+    const fenced = this.extractFirstFencedCodeBlock(normalized);
+    if (fenced) {
+      normalized = fenced.trim();
+    } else {
+      normalized = this.stripFenceMarkers(normalized).trim();
+      const likelyCode = this.extractLikelyCodeSnippet(normalized);
+      if (likelyCode) {
+        normalized = likelyCode.trim();
+      }
+    }
+    if (FUNCTION_BODY_ONLY_RE.test(instruction)) {
+      const bodyOnly = this.extractFunctionBody(normalized);
+      if (bodyOnly) {
+        normalized = bodyOnly.trim();
+      }
+    }
+    return normalized;
+  }
+  extractFirstFencedCodeBlock(text) {
+    const match = text.match(/```[^\n]*\n([\s\S]*?)```/);
+    return match?.[1];
+  }
+  stripFenceMarkers(text) {
+    return text.replace(/```[^\n]*\n?/g, "").replace(/```/g, "");
+  }
+  extractLikelyCodeSnippet(text) {
+    const lines = text.split(/\r?\n/);
+    let firstCodeLine = -1;
+    let lastCodeLine = -1;
+    lines.forEach((line, index) => {
+      if (this.isCodeLikeLine(line.trim())) {
+        if (firstCodeLine === -1) {
+          firstCodeLine = index;
+        }
+        lastCodeLine = index;
+      }
+    });
+    if (firstCodeLine === -1 || lastCodeLine === -1) {
+      return void 0;
+    }
+    const candidate = lines.slice(firstCodeLine, lastCodeLine + 1);
+    const filtered = candidate.filter((line) => {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) {
+        return true;
+      }
+      if (this.isCodeLikeLine(trimmed)) {
+        return true;
+      }
+      return !this.isLikelyProseLine(trimmed);
+    });
+    const joined = filtered.join("\n").trim();
+    return joined.length > 0 ? joined : void 0;
+  }
+  isCodeLikeLine(line) {
+    if (line.length === 0) {
+      return false;
+    }
+    if (/^(function|const|let|var|class|interface|type|enum|import|export|if|for|while|switch|return|async|await|try|catch|finally|public|private|protected|def|fn)\b/.test(line)) {
+      return true;
+    }
+    if (/^(\/\/|\/\*|\*|#)/.test(line)) {
+      return true;
+    }
+    if (/[{}()[\];=<>]/.test(line) || line.includes("=>")) {
+      return true;
+    }
+    return false;
+  }
+  isLikelyProseLine(line) {
+    if (line.length === 0) {
+      return false;
+    }
+    if (this.isCodeLikeLine(line)) {
+      return false;
+    }
+    const words = line.split(/\s+/).filter((word) => word.length > 0).length;
+    return words >= 5;
+  }
+  extractFunctionBody(text) {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) {
+      return void 0;
+    }
+    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+      return trimmed.slice(1, -1).trim();
+    }
+    const openIndex = trimmed.indexOf("{");
+    if (openIndex < 0) {
+      return void 0;
+    }
+    let depth = 0;
+    let closeIndex = -1;
+    for (let index = openIndex; index < trimmed.length; index += 1) {
+      const char = trimmed[index];
+      if (char === "{") {
+        depth += 1;
+      } else if (char === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          closeIndex = index;
+          break;
+        }
+      }
+    }
+    if (closeIndex <= openIndex) {
+      return void 0;
+    }
+    return trimmed.slice(openIndex + 1, closeIndex).trim();
+  }
+  limitText(text, maxChars) {
+    if (text.length <= maxChars) {
+      return text;
+    }
+    const headLength = Math.floor(maxChars * 0.7);
+    const tailLength = maxChars - headLength;
+    const head = text.slice(0, headLength).trimEnd();
+    const tail = text.slice(-tailLength).trimStart();
+    return `${head}
+
+[...truncated...]
+
+${tail}`;
+  }
+  inferLanguageHint(text) {
+    if (text.length === 0) {
+      return "english";
+    }
+    const asciiMatches = text.match(/[A-Za-z0-9\s.,:;!?'"`~!@#$%^&*()_+\-=[\]{}|\\/<>]/g);
+    const asciiCount = asciiMatches ? asciiMatches.length : 0;
+    const ratio = asciiCount / text.length;
+    return ratio >= 0.9 ? "english" : "non_english";
   }
   wrapResult(payload) {
     if (isRecord(payload)) {
@@ -1397,6 +1574,15 @@ var InferenceEngine = class {
       sections.push("Context:");
       sections.push(request.context.trim());
     }
+    sections.push("");
+    sections.push("Language policy: English-first execution.");
+    sections.push(
+      "If instruction or context is not English, translate it to concise English internally before solving."
+    );
+    sections.push("Do not reveal the translation step.");
+    sections.push(
+      "Write the final output in English unless the user explicitly asks for another output language."
+    );
     sections.push("");
     sections.push("Return only the final answer with clear, practical output.");
     return sections.join("\n");

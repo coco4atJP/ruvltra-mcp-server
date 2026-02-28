@@ -840,6 +840,15 @@ export class InferenceEngine {
     }
 
     sections.push('');
+    sections.push('Language policy: English-first execution.');
+    sections.push(
+      'If instruction or context is not English, translate it to concise English internally before solving.'
+    );
+    sections.push('Do not reveal the translation step.');
+    sections.push(
+      'Write the final output in English unless the user explicitly asks for another output language.'
+    );
+    sections.push('');
     sections.push('Return only the final answer with clear, practical output.');
     return sections.join('\n');
   }
