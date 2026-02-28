@@ -1,14 +1,14 @@
-AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
 
-'ruvllm' !== 'mock'
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+Error: tsx must be loaded with --import instead of --loader
+The --loader flag was deprecated in Node v20.6.0 and v18.19.0
+    at initialize (file:///E:/Sandbox/ruvltra-mcp-server/node_modules/tsx/dist/esm/index.mjs:1:985)
+    at AsyncLoaderHooksOnLoaderHookWorker.addCustomLoader (node:internal/modules/esm/hooks:212:24)
+    at AsyncLoaderHooksOnLoaderHookWorker.register (node:internal/modules/esm/hooks:186:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async initializeAsyncLoaderHooksOnLoaderHookWorker (node:internal/modules/esm/worker:76:5)
+    at async customizedModuleWorker (node:internal/modules/esm/worker:161:24)
 
-    at run (E:\Sandbox\ruvltra-mcp-server\tests\test-http-resilience.ts:94:12)
-    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
-  generatedMessage: true,
-  code: 'ERR_ASSERTION',
-  actual: 'ruvllm',
-  expected: 'mock',
-  operator: 'strictEqual',
-  diff: 'simple'
-}
-Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 76
+Node.js v24.13.0

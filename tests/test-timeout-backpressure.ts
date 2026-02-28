@@ -4,11 +4,16 @@ import {
   TaskTimeoutError,
   WorkerPool,
 } from '../src/workers/worker-pool.js';
+import { InferenceEngine } from '../src/ruvllm/inference-engine.js';
 import { loadServerConfig } from '../src/config/defaults.js';
 import { Logger } from '../src/utils/logger.js';
 
 async function run() {
   const logger = new Logger('error', 'test-timeout-backpressure');
+
+  // RuvLLM初期化を全体でモック化して、テスト環境のmock遅延を確実に発動させる
+  (InferenceEngine.prototype as any).tryInitializeRuvllm = async () => false;
+  (InferenceEngine.prototype as any).tryInitializeLlama = async () => false;
 
   const timeoutConfig = loadServerConfig({
     RUVLTRA_MIN_WORKERS: '1',
@@ -18,6 +23,8 @@ async function run() {
     RUVLTRA_MOCK_LATENCY_MS: '80',
     RUVLTRA_TASK_TIMEOUT_MS: '20',
     RUVLTRA_QUEUE_MAX_LENGTH: '4',
+    RUVLTRA_MODEL_PATH: '/invalid/path/to/prevent/initialization.gguf',
+    RUVLTRA_HTTP_MODEL: 'invalid-model-for-test',
   });
 
   const timeoutPool = new WorkerPool(timeoutConfig, logger);
@@ -45,6 +52,8 @@ async function run() {
     RUVLTRA_MOCK_LATENCY_MS: '100',
     RUVLTRA_TASK_TIMEOUT_MS: '500',
     RUVLTRA_QUEUE_MAX_LENGTH: '1',
+    RUVLTRA_MODEL_PATH: '/invalid/path/to/prevent/initialization.gguf',
+    RUVLTRA_HTTP_MODEL: 'invalid-model-for-test',
   });
 
   const backpressurePool = new WorkerPool(backpressureConfig, logger);

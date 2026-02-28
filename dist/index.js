@@ -1050,12 +1050,12 @@ var InferenceEngine = class {
     const clientObj = runtime.client;
     if (clientObj?.generate) {
       rawOutput = await this.withAbort(
-        clientObj.generate(prompt),
+        Promise.resolve(clientObj.generate(prompt)),
         signal
       );
     } else if (clientObj?.query) {
       rawOutput = await this.withAbort(
-        clientObj.query(prompt, { maxTokens, temperature }),
+        Promise.resolve(clientObj.query(prompt, { maxTokens, temperature })),
         signal
       );
     } else {

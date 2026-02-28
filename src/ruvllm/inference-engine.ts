@@ -376,13 +376,13 @@ export class InferenceEngine {
     if (clientObj?.generate) {
       // RuvLLM インスタンスの .generate() メソッド
       rawOutput = await this.withAbort(
-        clientObj.generate(prompt),
+        Promise.resolve(clientObj.generate(prompt)),
         signal
       );
     } else if (clientObj?.query) {
       // RuvLLM インスタンスの .query() メソッド (フォールバック)
       rawOutput = await this.withAbort(
-        clientObj.query(prompt, { maxTokens, temperature }),
+        Promise.resolve(clientObj.query(prompt, { maxTokens, temperature })),
         signal
       );
     } else {
