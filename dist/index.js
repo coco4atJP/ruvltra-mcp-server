@@ -1176,7 +1176,7 @@ var InferenceEngine = class {
         const cjsRequire = createRequire(import.meta.url);
         imported = cjsRequire("@ruvector/ruvllm");
       }
-      const moduleRecord = imported.default ?? imported;
+      const moduleRecord = "RuvLLM" in imported ? imported : imported.default ?? imported;
       const ruvllmModelId = process.env.RUVLTRA_RUVLLM_MODEL ?? "ruvltra-claude-code";
       let modelPath = this.config.modelPath;
       if (!modelPath) {

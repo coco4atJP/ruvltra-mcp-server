@@ -535,8 +535,9 @@ export class InferenceEngine {
         const cjsRequire = createRequire(import.meta.url);
         imported = cjsRequire('@ruvector/ruvllm') as Record<string, unknown>;
       }
-      const moduleRecord =
-        (imported.default as Record<string, unknown> | undefined) ?? imported;
+      const moduleRecord = ('RuvLLM' in imported)
+        ? imported
+        : ((imported.default as Record<string, unknown> | undefined) ?? imported);
 
       // モデルの自動ダウンロード（modelPath が未指定の場合）
       const ruvllmModelId = process.env.RUVLTRA_RUVLLM_MODEL ?? 'ruvltra-claude-code';

@@ -53,6 +53,7 @@ async function run() {
     RUVLTRA_LOG_LEVEL: 'error',
   });
   const retryEngine = new InferenceEngine(retryConfig, logger);
+  (retryEngine as any).tryInitializeRuvllm = async () => false;
 
   try {
     const retryResult = await retryEngine.generate({
@@ -81,6 +82,7 @@ async function run() {
     RUVLTRA_LOG_LEVEL: 'error',
   });
   const circuitEngine = new InferenceEngine(circuitConfig, logger);
+  (circuitEngine as any).tryInitializeRuvllm = async () => false;
 
   try {
     const first = await circuitEngine.generate({
