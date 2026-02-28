@@ -32,12 +32,13 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "prepublishOnly": "npm test && npm run build",
-    "test": "run-s test:smoke test:pool test:resilience test:sona",
+    "test": "run-s test:smoke test:pool test:resilience test:ruvllm-fallback test:sona",
     "test:smoke": "tsx tests/test-mcp.ts",
     "test:parallel": "tsx tests/test-parallel.ts",
     "test:pool": "tsx tests/test-timeout-backpressure.ts",
     "test:resilience": "tsx tests/test-http-resilience.ts",
-    "test:sona": "tsx tests/test-sona-persist.ts"
+    "test:sona": "tsx tests/test-sona-persist.ts",
+    "test:ruvllm-fallback": "tsx tests/test-ruvllm-fallback-detection.ts"
   },
   "keywords": [
     "mcp",
@@ -52,6 +53,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.5.0",
     "@ruvector/ruvllm": "^2.5.1",
+    "@ruvector/ruvllm-win32-x64-msvc": "^2.0.0",
     "dotenv": "^16.4.5",
     "node-llama-cpp": "^3.16.2"
   },

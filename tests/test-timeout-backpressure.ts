@@ -20,7 +20,8 @@ async function run() {
     RUVLTRA_MAX_WORKERS: '1',
     RUVLTRA_INITIAL_WORKERS: '1',
     RUVLTRA_LOG_LEVEL: 'error',
-    RUVLTRA_MOCK_LATENCY_MS: '80',
+    // task timeout is clamped to >= 100ms, so keep mock latency well above it.
+    RUVLTRA_MOCK_LATENCY_MS: '180',
     RUVLTRA_TASK_TIMEOUT_MS: '20',
     RUVLTRA_QUEUE_MAX_LENGTH: '4',
     RUVLTRA_MODEL_PATH: '/invalid/path/to/prevent/initialization.gguf',

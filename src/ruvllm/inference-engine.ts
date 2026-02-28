@@ -48,6 +48,13 @@ interface HttpCircuitState {
 }
 
 const BACKEND_ORDER: InferenceBackend[] = ['http', 'llama', 'ruvllm', 'mock'];
+const RUVLLM_NATIVE_PACKAGES: Record<string, string> = {
+  'darwin-x64': '@ruvector/ruvllm-darwin-x64',
+  'darwin-arm64': '@ruvector/ruvllm-darwin-arm64',
+  'linux-x64': '@ruvector/ruvllm-linux-x64-gnu',
+  'linux-arm64': '@ruvector/ruvllm-linux-arm64-gnu',
+  'win32-x64': '@ruvector/ruvllm-win32-x64-msvc',
+};
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -369,14 +376,17 @@ export class InferenceEngine {
 
     let rawOutput: unknown;
     const clientObj = runtime.client as {
-      generate?: (input: unknown) => Promise<unknown>;
-      query?: (prompt: string, config?: unknown) => Promise<unknown>;
+      generate?: (
+        prompt: string,
+        config?: Record<string, unknown>
+      ) => unknown | Promise<unknown>;
+      query?: (prompt: string, config?: unknown) => unknown | Promise<unknown>;
     } | null;
 
     if (clientObj?.generate) {
       // RuvLLM インスタンスの .generate() メソッド
       rawOutput = await this.withAbort(
-        Promise.resolve(clientObj.generate(prompt)),
+        Promise.resolve(clientObj.generate(prompt, { maxTokens, temperature })),
         signal
       );
     } else if (clientObj?.query) {
@@ -419,6 +429,12 @@ export class InferenceEngine {
     const text = this.extractGeneratedText(rawOutput);
     if (!text) {
       throw new Error('RuvLLM returned empty output');
+    }
+    if (this.isRuvllmFallbackMessage(text)) {
+      const fallbackNote = this.markRuvllmAsUnavailable(
+        'JavaScript fallback mode detected from generation output'
+      );
+      throw new Error(fallbackNote);
     }
 
     if (trajectoryBuilder && runtime.sonaCoordinator) {
@@ -610,6 +626,14 @@ export class InferenceEngine {
         return false;
       }
 
+      const nativeLoaded = this.detectRuvllmNativeLoaded(moduleRecord, client);
+      if (nativeLoaded === false) {
+        this.markRuvllmAsUnavailable(
+          'JavaScript fallback mode detected at initialization'
+        );
+        return false;
+      }
+
       this.ruvllmRuntime = {
         module: moduleRecord,
         client,
@@ -642,6 +666,87 @@ export class InferenceEngine {
       return 'llama';
     }
     return 'openai';
+  }
+
+  private detectRuvllmNativeLoaded(
+    moduleRecord: Record<string, unknown>,
+    client: unknown
+  ): boolean | undefined {
+    const clientRecord = client as
+      | {
+        isNativeLoaded?: () => unknown;
+      }
+      | undefined;
+    const clientNativeLoaded = this.tryCallBoolean(clientRecord?.isNativeLoaded);
+    if (typeof clientNativeLoaded === 'boolean') {
+      return clientNativeLoaded;
+    }
+
+    const versionFn = moduleRecord.version as (() => unknown) | undefined;
+    const version = this.tryCallString(versionFn);
+    if (!version) {
+      return undefined;
+    }
+    return !version.toLowerCase().includes('-js');
+  }
+
+  private markRuvllmAsUnavailable(reason: string): string {
+    this.backendReady.ruvllm = false;
+    this.ruvllmRuntime = undefined;
+
+    const packageName = this.getExpectedRuvllmNativePackage();
+    const installHint = packageName
+      ? `Install native bindings: npm install ${packageName}`
+      : 'Install the platform-specific @ruvector/ruvllm native package';
+    const note = `RuvLLM native runtime unavailable (${reason}). ${installHint}`;
+
+    this.backendNotes.ruvllm = note;
+    this.logger.warn(note);
+    return note;
+  }
+
+  private getExpectedRuvllmNativePackage(): string | undefined {
+    const platformKey = `${process.platform}-${process.arch}`;
+    return RUVLLM_NATIVE_PACKAGES[platformKey];
+  }
+
+  private isRuvllmFallbackMessage(text: string): boolean {
+    const normalized = text.toLowerCase();
+    return (
+      normalized.includes('[ruvllm javascript fallback mode]') ||
+      normalized.includes('no native simd module loaded') ||
+      normalized.includes('running in javascript fallback mode')
+    );
+  }
+
+  private tryCallBoolean(fn: (() => unknown) | undefined): boolean | undefined {
+    if (!fn) {
+      return undefined;
+    }
+    try {
+      const result = fn();
+      if (typeof result === 'boolean') {
+        return result;
+      }
+    } catch {
+      // Ignore probe failures.
+    }
+    return undefined;
+  }
+
+  private tryCallString(fn: (() => unknown) | undefined): string | undefined {
+    if (!fn) {
+      return undefined;
+    }
+    try {
+      const result = fn();
+      if (typeof result === 'string') {
+        return result;
+      }
+    } catch {
+      // Ignore probe failures.
+    }
+    return undefined;
   }
 
   private buildAttemptOrder(): InferenceBackend[] {
