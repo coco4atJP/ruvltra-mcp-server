@@ -55,13 +55,28 @@ npm run build
 node dist/index.js
 ```
 
-モックバックエンドが標準で動作します。実際の LLM 推論を使用するには、以下のいずれかの環境変数を設定してください。
+**特に環境変数を設定しなくても、RuvLLM バックエンドが自動で有効になります。**
+初回起動時に `ruvltra-claude-code` モデルが自動ダウンロードされ、`~/.ruvllm/models/` に保存されます（npx キャッシュとは独立しているため、再インストールしてもモデルは保持されます）。
+
+他の推論バックエンドを使用したい場合は、以下の環境変数を設定してください。
 
 | 方式 | 環境変数 | 説明 |
 |---|---|---|
+| **RuvLLM (デフォルト)** | 不要（自動） | 初回起動時にモデルを自動ダウンロード |
 | HTTP | `RUVLTRA_HTTP_ENDPOINT` | OpenAI 互換 / llama.cpp HTTP エンドポイント |
 | ローカルモデル | `RUVLTRA_MODEL_PATH` | GGUF モデルファイルのパス (`node-llama-cpp`) |
-| RuvLLM | `@ruvector/ruvllm` | RuvLLM ランタイム |
+
+### モデルの自動ダウンロード
+
+RuvLLM バックエンド使用時、モデルファイルは初回起動時に自動ダウンロードされます。
+
+| 項目 | 値 |
+|---|---|
+| デフォルトモデル | `ruvltra-claude-code` (ruv/ruvltra-claude-code) |
+| 保存先 | `~/.ruvllm/models/` (ホームディレクトリ直下) |
+| 変更方法 | 環境変数 `RUVLTRA_RUVLLM_MODEL` で指定 |
+
+> **💡 npx で起動しても、モデルファイルは npx キャッシュとは別の場所 (`~/.ruvllm/models/`) に保存されるため、再インストールやキャッシュクリアでモデルが消えることはありません。**
 
 ### MCP ツール一覧 (13種)
 
@@ -167,6 +182,7 @@ npm run test:parallel    # 並列生成
 | `RUVLTRA_HTTP_CIRCUIT_FAILURE_THRESHOLD` | `5` | サーキット開放閾値 |
 | `RUVLTRA_HTTP_CIRCUIT_COOLDOWN_MS` | `30000` | サーキットクールダウン |
 | `RUVLTRA_MODEL_PATH` | 自動探索 | ローカル GGUF モデルパス |
+| `RUVLTRA_RUVLLM_MODEL` | `ruvltra-claude-code` | RuvLLM 自動ダウンロードモデル ID |
 | `RUVLTRA_CONTEXT_LENGTH` | `4096` | コンテキスト長 |
 | `RUVLTRA_GPU_LAYERS` | `-1` | llama.cpp GPU レイヤー数 |
 | `RUVLTRA_THREADS` | `0` | llama.cpp スレッド数 (0=自動) |
