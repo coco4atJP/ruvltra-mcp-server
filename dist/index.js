@@ -1334,7 +1334,22 @@ var InferenceEngine = class {
         this.backendNotes.llama = "node-llama-cpp API not available";
         return false;
       }
-      const llama = await getLlama();
+      const llama = await getLlama({
+        logLevel: process.env.NODE_LLAMA_CPP_LOG_LEVEL ?? "error",
+        debug: false,
+        logger: (level, message) => {
+          const normalized = message.trim();
+          if (normalized.length === 0) {
+            return;
+          }
+          const levelName = String(level).toLowerCase();
+          if (levelName.includes("error") || levelName.includes("fatal")) {
+            this.logger.error(`[node-llama-cpp:${levelName}] ${normalized}`);
+            return;
+          }
+          this.logger.debug(`[node-llama-cpp:${levelName}] ${normalized}`);
+        }
+      });
       const model = await llama.loadModel({
         modelPath,
         gpuLayers: this.config.gpuLayers
@@ -2029,7 +2044,20 @@ var WorkerPool = class {
   constructor(config, logger) {
     this.config = config;
     this.logger = logger;
-    for (let index = 0; index < this.config.initialWorkers; index += 1) {
+    this.forceSingleLlamaWorker = Boolean(this.config.modelPath) && !this.config.httpEndpoint;
+    this.effectiveMinWorkers = this.forceSingleLlamaWorker ? 1 : this.config.minWorkers;
+    this.effectiveMaxWorkers = this.forceSingleLlamaWorker ? 1 : this.config.maxWorkers;
+    if (this.forceSingleLlamaWorker && (this.config.minWorkers > 1 || this.config.maxWorkers > 1 || this.config.initialWorkers > 1)) {
+      this.logger.warn(
+        "Forcing single-worker mode for local llama backend stability (modelPath configured without HTTP endpoint)"
+      );
+    }
+    const initialWorkers = clamp2(
+      this.config.initialWorkers,
+      this.effectiveMinWorkers,
+      this.effectiveMaxWorkers
+    );
+    for (let index = 0; index < initialWorkers; index += 1) {
       this.createWorker();
     }
     this.scaleDownTimer = setInterval(() => {
@@ -2042,6 +2070,9 @@ var WorkerPool = class {
   scaleDownTimer;
   pendingByTaskId = /* @__PURE__ */ new Map();
   runningByTaskId = /* @__PURE__ */ new Map();
+  forceSingleLlamaWorker;
+  effectiveMinWorkers;
+  effectiveMaxWorkers;
   createdWorkers = 0;
   inFlight = 0;
   submittedTasks = 0;
@@ -2104,8 +2135,8 @@ var WorkerPool = class {
       backendBreakdown[worker.inference.activeBackend] += 1;
     }
     return {
-      minWorkers: this.config.minWorkers,
-      maxWorkers: this.config.maxWorkers,
+      minWorkers: this.effectiveMinWorkers,
+      maxWorkers: this.effectiveMaxWorkers,
       currentWorkers: this.workers.length,
       queueMaxLength: this.config.queueMaxLength,
       queueLength: this.queue.length,
@@ -2124,7 +2155,11 @@ var WorkerPool = class {
     return nodes.map((worker) => worker.sona.getStats());
   }
   scaleWorkers(target) {
-    const desired = clamp2(Math.round(target), this.config.minWorkers, this.config.maxWorkers);
+    const desired = clamp2(
+      Math.round(target),
+      this.effectiveMinWorkers,
+      this.effectiveMaxWorkers
+    );
     if (desired > this.workers.length) {
       while (this.workers.length < desired) {
         this.createWorker();
@@ -2255,7 +2290,7 @@ var WorkerPool = class {
     })[0];
   }
   maybeScaleUp() {
-    const shouldScale = this.queue.length > this.workers.length && this.workers.length < this.config.maxWorkers;
+    const shouldScale = this.queue.length > this.workers.length && this.workers.length < this.effectiveMaxWorkers;
     if (!shouldScale) {
       return;
     }
@@ -2266,7 +2301,7 @@ var WorkerPool = class {
     });
   }
   maybeScaleDown() {
-    if (this.workers.length <= this.config.minWorkers) {
+    if (this.workers.length <= this.effectiveMinWorkers) {
       return;
     }
     const now = Date.now();
@@ -2280,7 +2315,7 @@ var WorkerPool = class {
     if (!removable) {
       return;
     }
-    if (this.workers.length > this.config.minWorkers) {
+    if (this.workers.length > this.effectiveMinWorkers) {
       this.removeWorker(removable);
       this.logger.debug("Auto-scaled worker pool down", {
         workers: this.workers.length
@@ -2707,6 +2742,8 @@ function loadServerConfig(env) {
 // src/index.ts
 import dotenv from "dotenv";
 dotenv.config();
+process.env.NODE_LLAMA_CPP_LOG_LEVEL ??= "error";
+process.env.NODE_LLAMA_CPP_DEBUG ??= "false";
 console.log = (...args) => console.error(...args);
 async function main() {
   const config = loadServerConfig(process.env);

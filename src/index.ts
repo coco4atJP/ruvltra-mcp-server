@@ -5,6 +5,10 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+// Keep node-llama-cpp logs away from MCP stdout and disable verbose debug mode by default.
+process.env.NODE_LLAMA_CPP_LOG_LEVEL ??= 'error';
+process.env.NODE_LLAMA_CPP_DEBUG ??= 'false';
+
 // Redirect all logs to stderr to protect MCP stdout channel
 console.log = (...args) => console.error(...args);
 

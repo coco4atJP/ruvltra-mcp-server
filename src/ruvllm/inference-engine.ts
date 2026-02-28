@@ -504,7 +504,11 @@ export class InferenceEngine {
     try {
       const llamaModule = (await import('node-llama-cpp')) as Record<string, unknown>;
       const getLlama = llamaModule.getLlama as
-        | (() => Promise<{ loadModel: (options: unknown) => Promise<unknown> }>)
+        | ((options?: {
+          logLevel?: string;
+          logger?: (level: unknown, message: string) => void;
+          debug?: boolean;
+        }) => Promise<{ loadModel: (options: unknown) => Promise<unknown> }>)
         | undefined;
       const LlamaChatSession = llamaModule.LlamaChatSession as LlamaRuntime['LlamaChatSession'] | undefined;
 
@@ -513,7 +517,22 @@ export class InferenceEngine {
         return false;
       }
 
-      const llama = await getLlama();
+      const llama = await getLlama({
+        logLevel: process.env.NODE_LLAMA_CPP_LOG_LEVEL ?? 'error',
+        debug: false,
+        logger: (level: unknown, message: string) => {
+          const normalized = message.trim();
+          if (normalized.length === 0) {
+            return;
+          }
+          const levelName = String(level).toLowerCase();
+          if (levelName.includes('error') || levelName.includes('fatal')) {
+            this.logger.error(`[node-llama-cpp:${levelName}] ${normalized}`);
+            return;
+          }
+          this.logger.debug(`[node-llama-cpp:${levelName}] ${normalized}`);
+        },
+      });
       const model = (await llama.loadModel({
         modelPath,
         gpuLayers: this.config.gpuLayers,

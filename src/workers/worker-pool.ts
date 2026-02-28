@@ -48,6 +48,9 @@ export class WorkerPool {
   private readonly scaleDownTimer: NodeJS.Timeout;
   private readonly pendingByTaskId = new Map<string, QueueItem>();
   private readonly runningByTaskId = new Map<string, QueueItem>();
+  private readonly forceSingleLlamaWorker: boolean;
+  private readonly effectiveMinWorkers: number;
+  private readonly effectiveMaxWorkers: number;
 
   private createdWorkers = 0;
   private inFlight = 0;
@@ -64,7 +67,33 @@ export class WorkerPool {
     private readonly config: ServerConfig,
     private readonly logger: Logger
   ) {
-    for (let index = 0; index < this.config.initialWorkers; index += 1) {
+    this.forceSingleLlamaWorker =
+      Boolean(this.config.modelPath) && !this.config.httpEndpoint;
+    this.effectiveMinWorkers = this.forceSingleLlamaWorker
+      ? 1
+      : this.config.minWorkers;
+    this.effectiveMaxWorkers = this.forceSingleLlamaWorker
+      ? 1
+      : this.config.maxWorkers;
+
+    if (
+      this.forceSingleLlamaWorker &&
+      (this.config.minWorkers > 1 ||
+        this.config.maxWorkers > 1 ||
+        this.config.initialWorkers > 1)
+    ) {
+      this.logger.warn(
+        'Forcing single-worker mode for local llama backend stability (modelPath configured without HTTP endpoint)'
+      );
+    }
+
+    const initialWorkers = clamp(
+      this.config.initialWorkers,
+      this.effectiveMinWorkers,
+      this.effectiveMaxWorkers
+    );
+
+    for (let index = 0; index < initialWorkers; index += 1) {
       this.createWorker();
     }
 
@@ -137,8 +166,8 @@ export class WorkerPool {
     }
 
     return {
-      minWorkers: this.config.minWorkers,
-      maxWorkers: this.config.maxWorkers,
+      minWorkers: this.effectiveMinWorkers,
+      maxWorkers: this.effectiveMaxWorkers,
       currentWorkers: this.workers.length,
       queueMaxLength: this.config.queueMaxLength,
       queueLength: this.queue.length,
@@ -161,7 +190,11 @@ export class WorkerPool {
   }
 
   scaleWorkers(target: number): WorkerPoolStatus {
-    const desired = clamp(Math.round(target), this.config.minWorkers, this.config.maxWorkers);
+    const desired = clamp(
+      Math.round(target),
+      this.effectiveMinWorkers,
+      this.effectiveMaxWorkers
+    );
 
     if (desired > this.workers.length) {
       while (this.workers.length < desired) {
@@ -319,7 +352,8 @@ export class WorkerPool {
 
   private maybeScaleUp(): void {
     const shouldScale =
-      this.queue.length > this.workers.length && this.workers.length < this.config.maxWorkers;
+      this.queue.length > this.workers.length &&
+      this.workers.length < this.effectiveMaxWorkers;
     if (!shouldScale) {
       return;
     }
@@ -331,7 +365,7 @@ export class WorkerPool {
   }
 
   private maybeScaleDown(): void {
-    if (this.workers.length <= this.config.minWorkers) {
+    if (this.workers.length <= this.effectiveMinWorkers) {
       return;
     }
 
@@ -352,7 +386,7 @@ export class WorkerPool {
       return;
     }
 
-    if (this.workers.length > this.config.minWorkers) {
+    if (this.workers.length > this.effectiveMinWorkers) {
       this.removeWorker(removable);
       this.logger.debug('Auto-scaled worker pool down', {
         workers: this.workers.length,
