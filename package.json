@@ -1,6 +1,6 @@
 {
   "name": "ruvltra-mcp-server",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "RuvLTRA MCP Server for fast and low-cost vibe coding",
   "license": "ISC",
   "type": "module",
