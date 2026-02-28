@@ -78,7 +78,7 @@ export class InferenceEngine {
   constructor(
     private readonly config: ServerConfig,
     private readonly logger: Logger
-  ) {}
+  ) { }
 
   async initialize(): Promise<void> {
     if (this.initialized) {
@@ -215,17 +215,17 @@ export class InferenceEngine {
     const payload =
       format === 'llama'
         ? {
-            prompt,
-            n_predict: maxTokens,
-            temperature,
-            stream: false,
-          }
+          prompt,
+          n_predict: maxTokens,
+          temperature,
+          stream: false,
+        }
         : {
-            model: this.config.httpModel,
-            messages: [{ role: 'user', content: prompt }],
-            max_tokens: maxTokens,
-            temperature,
-          };
+          model: this.config.httpModel,
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: maxTokens,
+          temperature,
+        };
 
     const maxRetries = Math.max(0, this.config.httpMaxRetries);
     let lastError: Error | undefined;
@@ -368,44 +368,52 @@ export class InferenceEngine {
     }
 
     let rawOutput: unknown;
-    const client = runtime.client as { generate?: (input: unknown) => Promise<unknown> } | null;
-    const moduleRecord = runtime.module as {
+    const clientObj = runtime.client as {
       generate?: (input: unknown) => Promise<unknown>;
-      complete?: (input: unknown) => Promise<unknown>;
-    };
+      query?: (prompt: string, config?: unknown) => Promise<unknown>;
+    } | null;
 
-    if (client?.generate) {
+    if (clientObj?.generate) {
+      // RuvLLM インスタンスの .generate() メソッド
       rawOutput = await this.withAbort(
-        client.generate({
-          prompt,
-          maxTokens,
-          temperature,
-          model: this.config.modelPath ?? this.config.httpModel,
-        }),
+        clientObj.generate(prompt),
         signal
       );
-    } else if (moduleRecord.generate) {
+    } else if (clientObj?.query) {
+      // RuvLLM インスタンスの .query() メソッド (フォールバック)
       rawOutput = await this.withAbort(
-        moduleRecord.generate({
-          prompt,
-          maxTokens,
-          temperature,
-          model: this.config.modelPath ?? this.config.httpModel,
-        }),
-        signal
-      );
-    } else if (moduleRecord.complete) {
-      rawOutput = await this.withAbort(
-        moduleRecord.complete({
-          prompt,
-          maxTokens,
-          temperature,
-          model: this.config.modelPath ?? this.config.httpModel,
-        }),
+        clientObj.query(prompt, { maxTokens, temperature }),
         signal
       );
     } else {
-      throw new Error('No compatible generate API found in @ruvector/ruvllm');
+      // モジュールレベルの generate/complete (将来のバージョン互換)
+      const moduleRecord = runtime.module as {
+        generate?: (input: unknown) => Promise<unknown>;
+        complete?: (input: unknown) => Promise<unknown>;
+      };
+      if (moduleRecord.generate) {
+        rawOutput = await this.withAbort(
+          moduleRecord.generate({
+            prompt,
+            maxTokens,
+            temperature,
+            model: this.config.modelPath ?? this.config.httpModel,
+          }),
+          signal
+        );
+      } else if (moduleRecord.complete) {
+        rawOutput = await this.withAbort(
+          moduleRecord.complete({
+            prompt,
+            maxTokens,
+            temperature,
+            model: this.config.modelPath ?? this.config.httpModel,
+          }),
+          signal
+        );
+      } else {
+        throw new Error('No compatible generate API found in @ruvector/ruvllm');
+      }
     }
 
     const text = this.extractGeneratedText(rawOutput);
@@ -518,25 +526,35 @@ export class InferenceEngine {
 
   private async tryInitializeRuvllm(): Promise<boolean> {
     try {
-      const imported = (await import('@ruvector/ruvllm')) as Record<string, unknown>;
+      // ESM ビルドに拡張子なし re-export のバグがあるため、CJS フォールバックを用意
+      let imported: Record<string, unknown>;
+      try {
+        imported = (await import('@ruvector/ruvllm')) as Record<string, unknown>;
+      } catch {
+        const { createRequire } = await import('node:module');
+        const cjsRequire = createRequire(import.meta.url);
+        imported = cjsRequire('@ruvector/ruvllm') as Record<string, unknown>;
+      }
       const moduleRecord =
         (imported.default as Record<string, unknown> | undefined) ?? imported;
 
       let client: unknown = null;
 
-      const createClient = moduleRecord.createClient as
-        | ((options: Record<string, unknown>) => Promise<unknown>)
-        | undefined;
       const RuvLLMClass = moduleRecord.RuvLLM as
         | (new (options: Record<string, unknown>) => unknown)
         | undefined;
+      const createClient = moduleRecord.createClient as
+        | ((options: Record<string, unknown>) => Promise<unknown>)
+        | undefined;
 
-      if (createClient) {
-        client = await createClient({
+      // RuvLLM コンストラクタを優先（インスタンスに .generate()/.query() がある）
+      if (RuvLLMClass) {
+        client = new RuvLLMClass({
+          learningEnabled: this.config.sonaEnabled,
           model: this.config.modelPath ?? this.config.httpModel,
         });
-      } else if (RuvLLMClass) {
-        client = new RuvLLMClass({
+      } else if (createClient) {
+        client = await createClient({
           model: this.config.modelPath ?? this.config.httpModel,
         });
       }
@@ -548,13 +566,15 @@ export class InferenceEngine {
         | (new () => RuvllmRuntime['sonaCoordinator'])
         | undefined;
 
+      const clientObj = client as { generate?: unknown; query?: unknown } | null;
+      const clientHasCallableGenerator =
+        typeof clientObj?.generate === 'function' ||
+        typeof clientObj?.query === 'function';
       const moduleHasCallableGenerator =
         typeof moduleRecord.generate === 'function' ||
         typeof moduleRecord.complete === 'function';
-      const clientHasCallableGenerator =
-        typeof (client as { generate?: unknown } | null)?.generate === 'function';
 
-      if (!moduleHasCallableGenerator && !clientHasCallableGenerator) {
+      if (!clientHasCallableGenerator && !moduleHasCallableGenerator) {
         this.backendNotes.ruvllm =
           'Initialization failed: no callable generate API found in module/client';
         return false;

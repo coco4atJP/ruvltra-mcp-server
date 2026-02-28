@@ -1047,40 +1047,42 @@ var InferenceEngine = class {
       trajectoryBuilder.startStep?.("query", prompt);
     }
     let rawOutput;
-    const client = runtime.client;
-    const moduleRecord = runtime.module;
-    if (client?.generate) {
+    const clientObj = runtime.client;
+    if (clientObj?.generate) {
       rawOutput = await this.withAbort(
-        client.generate({
-          prompt,
-          maxTokens,
-          temperature,
-          model: this.config.modelPath ?? this.config.httpModel
-        }),
+        clientObj.generate(prompt),
         signal
       );
-    } else if (moduleRecord.generate) {
+    } else if (clientObj?.query) {
       rawOutput = await this.withAbort(
-        moduleRecord.generate({
-          prompt,
-          maxTokens,
-          temperature,
-          model: this.config.modelPath ?? this.config.httpModel
-        }),
-        signal
-      );
-    } else if (moduleRecord.complete) {
-      rawOutput = await this.withAbort(
-        moduleRecord.complete({
-          prompt,
-          maxTokens,
-          temperature,
-          model: this.config.modelPath ?? this.config.httpModel
-        }),
+        clientObj.query(prompt, { maxTokens, temperature }),
         signal
       );
     } else {
-      throw new Error("No compatible generate API found in @ruvector/ruvllm");
+      const moduleRecord = runtime.module;
+      if (moduleRecord.generate) {
+        rawOutput = await this.withAbort(
+          moduleRecord.generate({
+            prompt,
+            maxTokens,
+            temperature,
+            model: this.config.modelPath ?? this.config.httpModel
+          }),
+          signal
+        );
+      } else if (moduleRecord.complete) {
+        rawOutput = await this.withAbort(
+          moduleRecord.complete({
+            prompt,
+            maxTokens,
+            temperature,
+            model: this.config.modelPath ?? this.config.httpModel
+          }),
+          signal
+        );
+      } else {
+        throw new Error("No compatible generate API found in @ruvector/ruvllm");
+      }
     }
     const text = this.extractGeneratedText(rawOutput);
     if (!text) {
@@ -1166,25 +1168,34 @@ var InferenceEngine = class {
   }
   async tryInitializeRuvllm() {
     try {
-      const imported = await import("@ruvector/ruvllm");
+      let imported;
+      try {
+        imported = await import("@ruvector/ruvllm");
+      } catch {
+        const { createRequire } = await import("module");
+        const cjsRequire = createRequire(import.meta.url);
+        imported = cjsRequire("@ruvector/ruvllm");
+      }
       const moduleRecord = imported.default ?? imported;
       let client = null;
-      const createClient = moduleRecord.createClient;
       const RuvLLMClass = moduleRecord.RuvLLM;
-      if (createClient) {
-        client = await createClient({
+      const createClient = moduleRecord.createClient;
+      if (RuvLLMClass) {
+        client = new RuvLLMClass({
+          learningEnabled: this.config.sonaEnabled,
           model: this.config.modelPath ?? this.config.httpModel
         });
-      } else if (RuvLLMClass) {
-        client = new RuvLLMClass({
+      } else if (createClient) {
+        client = await createClient({
           model: this.config.modelPath ?? this.config.httpModel
         });
       }
       const TrajectoryBuilder = moduleRecord.TrajectoryBuilder;
       const SonaCoordinator = moduleRecord.SonaCoordinator;
+      const clientObj = client;
+      const clientHasCallableGenerator = typeof clientObj?.generate === "function" || typeof clientObj?.query === "function";
       const moduleHasCallableGenerator = typeof moduleRecord.generate === "function" || typeof moduleRecord.complete === "function";
-      const clientHasCallableGenerator = typeof client?.generate === "function";
-      if (!moduleHasCallableGenerator && !clientHasCallableGenerator) {
+      if (!clientHasCallableGenerator && !moduleHasCallableGenerator) {
         this.backendNotes.ruvllm = "Initialization failed: no callable generate API found in module/client";
         return false;
       }
