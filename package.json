@@ -52,7 +52,6 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.5.0",
     "@ruvector/ruvllm": "^2.5.1",
-    "@ruvector/ruvllm-win32-x64-msvc": "^2.0.0",
     "dotenv": "^16.4.5",
     "node-llama-cpp": "^3.16.2"
   },
